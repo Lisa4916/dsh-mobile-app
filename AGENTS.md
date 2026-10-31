@@ -79,8 +79,9 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 | 5 | 启动即自动连接，落在 DSH 主界面（document-start 清 `dsh.sessions.current`） | ✅ |
 | 6 | 移除顶部返回键（压住了 DSH 自己的侧边栏按钮） | ✅ |
 | **7** | **公网远程连接（隧道）** | ⬅ **下一步，阻塞中** |
-| 8 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
-| 9 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
+| 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness` | ✅ 见 §10 |
+| 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
+| 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
 
 **第 7 项阻塞点**：`cloudflared.exe` 已缓存在 `C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B），
 但本机开着 Clash/mihomo 且启用 sing-tun 入站规则，会掐断 cloudflared 边缘连接（`error 1033`）。
@@ -231,7 +232,39 @@ CSS px × `(1080 / window.innerWidth)` = ×2.748。用 CSS 值直接点会全部
 
 ---
 
-## 8. 非目标
+## 8. 知识库（本项目经验沉淀，开发前先查）
+
+本项目在 DSH 里挂了一个知识库：**手机软件开发知识库** `e1b49da1-ad61-4586-9333-ee4ec202e315`，
+覆盖 Android/Kotlin 工程知识（构建约束、WebView 外壳与 JS 桥、键盘避让、动画时序、ADB+CDP 调试、单测可测性）。
+已挂载到 `D:\DeepSeek Harness` 与本项目目录，`write_mode='audit'`。
+
+**开发前先查**：遇到「这个 Android 问题以前怎么解决的」「构建为什么失败」「真机行为怎么量」，先 `knowledge_search`，
+不要重新推一遍。库里每条都是本机实测结论，带环境标注。
+
+种子文档在 `kb/`（5 篇 Markdown），入库脚本在 `tools/`：
+
+| 脚本 | 用途 |
+|---|---|
+| `kb-ingest.mjs` | 读 `kb/*.md` → 用插件自己的函数渲染/哈希/切节 → 一个事务写 5 张表 + 落盘 md。`--dry` 只打印 |
+| `kb-verify.mjs` | 入库核对：5 表计数、`validStructure` 校验、磁盘 md 能否解回、FTS 召回试探 |
+| `kb-mount.mjs` | 挂载到项目目录 |
+
+**存储层事实（要改库内容必读）**：知识库后端是 `@lemoncat7/dsh-knowledge` v2.17.0
+（`C:\Users\yaoqi\.dsh\profiles\desktop\node_modules\@lemoncat7\dsh-knowledge\lib\`，ESM），
+不是 `dsh-mnemon`（那只是 recall/writeback 策略层）。DB 在 `C:\Users\yaoqi\.dsh\knowledge\knowledge.sqlite`。
+
+- **不要手搓格式**：直接 import 插件的 `renderKnowledgeMarkdown` / `markdownHash` / `parseKnowledgeMarkdown` /
+  `buildPassageStructure` / `contentHash` / `normalizeTags`，用 `node:sqlite` 的 `DatabaseSync` 写。
+- `knowledge_entries.content_hash` = `sha256(JSON.stringify({knowledgeBaseId, title小写, body小写, type, tags: normalizeTags(tags), scope}))`
+- `knowledge_documents.content_hash` = `markdownHash(带 front matter 的完整 markdown)`，**不是** `content` 列
+- `knowledge_passage_index.body_hash` = 裸 `sha256(body)`
+- `knowledge_passage_index` 上有 `AFTER INSERT ON knowledge_entries` 触发器会预建 `pending` 行，
+  手写时要 `ON CONFLICT(entry_id) DO UPDATE`，否则撞 `UNIQUE constraint failed: entry_id`。
+- `knowledge` 工具网关**没有 document_create**，入库只能走存储层。
+
+---
+
+## 9. 非目标
 
 - **不重写 DSH 前端**（§0 三条依据）。
 - **不改 `dsh-pocket`**。它是外部组件，本仓库只消费它的 :3081 页面。
@@ -240,7 +273,7 @@ CSS px × `(1080 / window.innerWidth)` = ×2.748。用 CSS 值直接点会全部
 
 ---
 
-## 9. 相关项目
+## 10. 相关项目
 
 | 项目 | 关系 |
 |---|---|

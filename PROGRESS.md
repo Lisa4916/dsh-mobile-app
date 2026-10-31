@@ -16,6 +16,7 @@
 | 5 | 启动自动连接 + 落在主界面 | ✅ | CDP 实测 `title=DeepSeek Harness` |
 | 6 | 移除顶部返回键 | ✅ | 交给系统返回键 |
 | 7 | 公网远程连接（隧道） | ⛔ 阻塞 | 待定 TUN 取舍 |
+| 8 | 手机软件开发知识库（5 篇种子文档入库 + 挂载） | ✅ | entries/documents/fts = 5/5/5 |
 
 **测试基线：`tests=12 failures=0 errors=0`**（`EndpointTest`）
 **APK：`app-debug.apk` 9,710,467 B**（versionName 0.1.0，versionCode 1）
@@ -123,6 +124,46 @@ CDP 查出靠的是 `localStorage['dsh.sessions.current']`，与 URL 无关。
 
 ---
 
+## 第 8 步：手机软件开发知识库 ✅
+
+用户说「建立手机软件开发的知识库」，之后要「把五篇种子文档真正入库」。
+
+**为什么不走插件工具**：`knowledge` 网关只暴露 base 创建/更新、文档分组、文档状态、note 系列、search/read，
+**没有 document_create**。所以入库只能落到存储层。
+
+**关键发现：不需要手搓格式。** 知识库后端不在 `dsh-mnemon`，而在 `@lemoncat7/dsh-knowledge` v2.17.0
+（`C:\Users\yaoqi\.dsh\profiles\desktop\node_modules\@lemoncat7\dsh-knowledge\lib\`，ESM）。
+直接 import 它自己的 `renderKnowledgeMarkdown` / `markdownHash` / `parseKnowledgeMarkdown` /
+`buildPassageStructure` / `contentHash` / `normalizeTags`，渲染、哈希、structure_json 全部由插件代码算，
+再用 Node 24 内置 `node:sqlite` 的 `DatabaseSync` 写库 —— 格式与哈希 100% 一致。
+
+之前试 6 种哈希组合全不匹配，是因为漏了两件事：
+- `knowledge_entries.content_hash` = `sha256(JSON.stringify({knowledgeBaseId, title 小写, body 小写, type, tags: normalizeTags(tags), scope}))`
+- `knowledge_documents.content_hash` = `markdownHash(带 front matter 的完整 markdown)`，不是 `content` 列
+- `knowledge_passage_index.body_hash` = 裸 `sha256(body)`
+
+**脚本三件套**（`tools/`，均可复跑，`kb-ingest.mjs` 幂等靠 `ON CONFLICT`）：
+
+| 脚本 | 作用 |
+|---|---|
+| `kb-ingest.mjs` | 读 `kb/*.md` → 插件函数渲染/哈希/切节 → 一个事务写 5 张表 + 落盘 md。`--dry` 只打印不写 |
+| `kb-verify.mjs` | 入库核对：5 表计数、structure_json 过 `validStructure`、磁盘 md 能否被 `parseKnowledgeMarkdown` 解回、FTS 召回试探 |
+| `kb-mount.mjs` | 把库挂到 `D:\DeepSeek Harness` 与 `D:\dsh-mobile-app`（`write_mode='audit'`） |
+
+**踩到的坑**：`knowledge_passage_index` 上有个 `knowledge_passage_insert AFTER INSERT ON knowledge_entries`
+触发器，插 entry 时自动建了 `state='pending'` 的行，所以后续 `INSERT` 会撞 `UNIQUE constraint failed: entry_id`。
+必须改成 `ON CONFLICT(entry_id) DO UPDATE` 覆盖成 `ready`。
+
+**验证证据**：
+- `entries=5 documents=5 fts=5`，5 篇全部 `state=ready`、`validStructure=valid`、`totalChars` 与正文长度一致。
+- 磁盘 `base-e1b49da1\` 下 5 个 md 全部能被 `parseKnowledgeMarkdown` 解回，title/body 逐字相等。
+- UI 实测：知识文档页显示「5 篇已加载」，分组为 测试/调试/构建/键盘/外壳 各 1 篇；
+  「知识库与挂载」页显示「知识库 5、项目与会话挂载 3」。
+- 本会话 mounted bases 已出现该库，`knowledge_search`「WebView 键盘动画 页面驱动 108ms 批处理」
+  一次命中 3 篇，首条正好定位到「原生侧：不给 WebView 设 bottomMargin」那一节。
+
+---
+
 ## 下一步
 
-接第 7 步，等 TUN 取舍定下来。之后按 `AGENTS.md` §3 的 8、9 项推进。
+第 7 步仍等 TUN 取舍定下来。知识库已可用，后续本项目开发会走知识优先检索。

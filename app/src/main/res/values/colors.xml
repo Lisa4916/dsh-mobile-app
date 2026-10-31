@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ink">#111318</color>
+    <color name="ink_dim">#5A6070</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="surface_dark">#0F1117</color>
+    <!-- DSH 页面实测 body 背景色（CDP: rgb(21,21,23)）。WebView 容器与窗口底色都用它，
+         这样键盘弹出动画期间即使露出一两帧容器底色，也与页面同色，看不见白闪。 -->
+    <color name="page_dark">#151517</color>
+    <color name="brand">#4F6EF7</color>
+    <color name="brand_dim">#3A55CC</color>
+    <color name="scan_scrim">#CC000000</color>
+    <color name="scan_frame">#4F6EF7</color>
+    <color name="warn">#B45309</color>
+</resources>

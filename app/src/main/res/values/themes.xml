@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.DshRemote" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/brand</item>
+        <item name="colorPrimaryVariant">@color/brand_dim</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
+        <!-- 窗口底色必须与 DSH 页面底色一致（实测 #151517）。键盘弹出动画期间
+             WebView 会先让位、键盘随后滑入，那一两帧的缝里露出的就是窗口底色；
+             底色是白的就是刺眼的白闪。 -->
+        <item name="android:windowBackground">@color/page_dark</item>
+    </style>
+
+    <style name="Theme.DshRemote.Scan" parent="Theme.DshRemote">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
+</resources>

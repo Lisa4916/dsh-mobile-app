@@ -1,0 +1,18 @@
+# Gradle / AGP
+.gradle/
+build/
+app/build/
+local.properties
+captures/
+.kotlin/
+
+# 隔离用的 GRADLE_USER_HOME（README 的构建命令会用到）
+.gradle-home/
+
+# 真机调试产物：帧序列、录屏、拉下来的 framework-res.apk 很大，不入库
+build-artifacts/
+
+# IDE
+.idea/
+*.iml
+.DS_Store

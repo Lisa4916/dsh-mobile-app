@@ -403,20 +403,80 @@ object WebViewFactory {
     """
 
     /**
-     * 把 DSH 退回开始界面（会话列表/首页）。
+     * 把 DSH 退回开始界面（会话列表/首页）—— **轻量视图切换，不重载页面**。
      *
-     * 做法是清掉会话恢复键再重载：`dsh.sessions.current` 是 DSH 唯一记着
-     * 「上次打开哪个会话」的地方，清掉后重载必然落到开始界面 —— 真机实测有效。
+     * 为什么不能用 `location.reload()`：那会让前端重走整个启动流程（插件重新加载、
+     * 首屏重绘、再读一次会话恢复键），视觉上就是「退出软件再重进」。用户明确指出过两次。
      *
-     * 为什么不用 `history.back()` / `goBack()`：DSH 不往 WebView 历史栈里压条目
-     * （进会话前后 history.length 都是 2，href 也不变）。实测按系统返回键触发
-     * `goBack()` 的结果是**整页重载并回到同一个会话**（因为会话键还在），
-     * 用户看到的是「原地刷新」，不是后退。
+     * 实测结论（`tools/probe-home-entry.mjs` 探测所得，判据是「页面内挂在 window 上的标记
+     * 是否还在」——reload 必丢、视图切换不丢）：
+     *  - 点顶部会话切换器 `mOxcpG_main` / `mOxcpG_chevron`：无变化
+     *  - 派发 Escape 键：无变化
+     *  - **点侧栏「新会话」按钮 `wtg9ga_newSession`：切到 home 且标记仍在 → 真·轻量切换**
+     *
+     * 所以这里走 UI 路径。两个必须处理的细节：
+     *  1. 侧栏收起时，`wtg9ga_newSession` 的 left 是 **-199**（被 CSS 移出屏幕），click 无效。
+     *     必须先点顶部的侧栏开关（收起态下它在屏幕内的副本是无类名 button，y<60）。
+     *  2. 侧栏展开是**动画**，newSession 的 left 从 -199 变到 14 需要时间。所以用轮询等待，
+     *     不能点完就立刻点下一个。
+     *
+     * 整个流程约 1–2 秒，比 reload 快，且不闪白、不重放插件加载。
      */
     const val DSH_GO_HOME_JS = """
         (function(){
-          try { localStorage.removeItem('dsh.sessions.current'); } catch (e) {}
-          try { location.reload(); } catch (e) {}
+          if (window.__dshGoingHome) return;
+          window.__dshGoingHome = true;
+
+          var started = Date.now();
+          var TIMEOUT_MS = 2600;
+
+          function isVisible(el){
+            if (!el) return false;
+            var r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0 && r.left >= 0 && r.left < window.innerWidth;
+          }
+
+          // 收起态下，侧栏开关的屏幕内副本是「顶部、无类名」的 button
+          function findHeaderToggle(){
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+              var b = btns[i];
+              if (!b.getBoundingClientRect) continue;
+              var r = b.getBoundingClientRect();
+              if (r.width < 20 || r.height < 20) continue;
+              if (r.top > 60) continue;
+              if (b.className) continue;
+              if (r.left < 0 || r.left > window.innerWidth) continue;
+              return b;
+            }
+            return null;
+          }
+
+          function newSessionButton(){
+            var b = document.querySelector('.wtg9ga_newSession');
+            return isVisible(b) ? b : null;
+          }
+
+          // 用 setTimeout 而不是 requestAnimationFrame：rAF 在页面不可见 / 窗口过渡动画
+          // 期间会被完全暂停，而「按下返回」那一刻恰好就是这种状态，用 rAF 会让整个流程卡死。
+          function tick(){
+            if (Date.now() - started > TIMEOUT_MS) {
+              window.__dshGoingHome = false;
+              return;
+            }
+            var ns = newSessionButton();
+            if (ns) {
+              // 侧栏已展开 → 点「新会话」切回开始界面（真机实测：页面不重载）
+              ns.click();
+              window.__dshGoingHome = false;
+              return;
+            }
+            var tog = findHeaderToggle();
+            if (tog) tog.click();
+            setTimeout(tick, 120);
+          }
+
+          tick();
         })();
     """
 

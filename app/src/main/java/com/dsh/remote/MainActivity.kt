@@ -676,6 +676,7 @@ class MainActivity : AppCompatActivity() {
                     when (backDecider.decide(isWebViewVisible = true, location = where)) {
                         BackNavigationDecider.Action.GO_TO_START -> {
                             backDecider.noteWentBack()
+                            // 轻量视图切换（展开侧栏 → 点新会话），约 1–2 秒，不重载页面
                             webView.evaluateJavascript(WebViewFactory.DSH_GO_HOME_JS, null)
                         }
                         BackNavigationDecider.Action.EXIT_APP -> finish()

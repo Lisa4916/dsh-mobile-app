@@ -20,7 +20,7 @@
 | 8 | 手机软件开发知识库（5 篇种子文档入库 + 挂载） | ✅ | entries/documents/fts = 5/5/5 |
 
 **测试基线：`tests=24 failures=0 errors=0`**（`EndpointTest`，原 12 条 → 24 条）
-**APK：`app-debug.apk` 7,512,939 B**（versionName 0.1.0，versionCode 1）
+**APK：`app-debug.apk` 7,469,704 B（全量构建；增量构建会差约 40 KB，属 dex/资源打包顺序差异，不是回归）**（versionName 0.1.0，versionCode 1）
 
 ---
 
@@ -177,9 +177,9 @@ CDP 查出靠的是 `localStorage['dsh.sessions.current']`，与 URL 无关。
 
 ### 验证
 
-- `:app:assembleDebug` 通过；`:app:testDebugUnitTest` **tests=24 failures=0 errors=0**
+- `:app:assembleDebug` 通过；`:app:testDebugUnitTest --rerun-tasks` **tests=24 failures=0 errors=0**
   （12 → 23 → 24：新增 12 条覆盖网段边界、回环、IPv6 私有、CGNAT、mapped-v6、序列化兼容、易变地址）。
-- APK `7,512,939 B`。
+- APK `7,469,704 B`（全量构建）。
 - 真机验证待 adb 设备接入后补做。
 
 ---

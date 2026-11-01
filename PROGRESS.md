@@ -15,11 +15,12 @@
 | 4 | 键盘避让改为页面 rAF 自驱 | ✅ | 帧间隔 8ms，全程 195ms |
 | 5 | 启动自动连接 + 落在主界面 | ✅ | CDP 实测 `title=DeepSeek Harness` |
 | 6 | 移除顶部返回键 | ✅ | 交给系统返回键 |
-| 7 | 公网远程连接（隧道） | ⛔ 阻塞 | 待定 TUN 取舍 |
+| 7 | 公网远程连接（隧道） | 🟡 阻塞已解，待真机 | 见下 |
+| 7a | 连接列表区分「局域网 / 公网 / 本机」落点 | ✅ | `tests=24 failures=0` |
 | 8 | 手机软件开发知识库（5 篇种子文档入库 + 挂载） | ✅ | entries/documents/fts = 5/5/5 |
 
-**测试基线：`tests=12 failures=0 errors=0`**（`EndpointTest`）
-**APK：`app-debug.apk` 9,710,467 B**（versionName 0.1.0，versionCode 1）
+**测试基线：`tests=24 failures=0 errors=0`**（`EndpointTest`，原 12 条 → 24 条）
+**APK：`app-debug.apk` 7,512,939 B**（versionName 0.1.0，versionCode 1）
 
 ---
 
@@ -112,15 +113,74 @@ CDP 查出靠的是 `localStorage['dsh.sessions.current']`，与 URL 无关。
 
 ---
 
-## 第 7 步：公网远程连接 ⛔ 阻塞
+## 第 7 步：公网远程连接 ⛔ → 🟡 阻塞解除（2026-11-02 实测）
 
-用户要求「实现远程连接」。`cloudflared.exe` 已缓存在 `C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B），
-`dsh-pocket` 的隧道端点也查清了（`tunnel.start` 必须带 `payload.disclaimer=true`）。
+### 旧记录说的阻塞理由已经不成立
 
-**卡住的原因**：本机开着 Clash/mihomo 且启用 sing-tun 入站规则，会掐断 cloudflared 边缘连接（`error 1033`）。
-已向用户提出两条路，等决策：
-1. 关 TUN 模式后走 cloudflared（免费、无需注册、随机子域）。
-2. 换 cpolar（需要注册，有固定子域）。
+`AGENTS.md` 与旧 PROGRESS 都写「Clash/mihomo 开 sing-tun 掐断 cloudflared（error 1033）」。本轮逐项实测：
+
+| 检查项 | 旧记录 | 实测 |
+|---|---|---|
+| mihomo/clash/verge 进程 | 开着 | **一个都没有** |
+| wintun/TAP 网卡 | 启用 | **无** |
+| 系统代理 | — | `ProxyEnable=0`（只剩 `ProxyServer=127.0.0.1:7890` 字符串残留） |
+| 出口 | — | `ip=2408:832e:...:7844 loc=CN warp=off`，直连 |
+| cloudflared | 边缘被掐 | `2026.10.7`；precheck 全 PASS（QUIC UDP / HTTP2 TCP / Cloudflare API） |
+| 隧道注册 | 1033 | `Registered tunnel connection` `location=lax11` |
+| 公网可达 | — | `https://<random>.trycloudflare.com/` → **200**，`title=DSH Pocket · 访问验证`，`cf-ray=...-LAX` |
+
+本地 `http://127.0.0.1:3081/` 与公网都是 200 / 4210 B，内容一致 —— 数据面真的通了。
+探测用 cloudflared 已清理，3081 主进程监听不受影响。
+
+**结论**：不用关 TUN，也不用换 cpolar。第 7 步的阻塞从「技术不通」降级为「产品取舍」。
+
+### 顺带查清的事实
+
+- `3081` 由 `DeepSeek Harness.exe`（pid 10148）自己监听；`54282` 当前无监听，反代仍工作。
+- `settings.json`：`publicPinCustom=true`、`lanPinCustom=true` → **PIN 已固定，不再轮换**；
+  `token`(8 B) 与 `token-lan`(8 B) 都在，`DEFAULT_LAN_URL` 里的 `token=60111186` 就是 `token-lan`。
+- `tunnel-auto.json` 存在但当前没有 cloudflared 在跑，说明上次隧道未处在开启态。
+- `Endpoint.parseUri` 本来就接受 `https://`，公网地址不需要改解析逻辑。
+
+### 剩余阻塞（都不是技术问题）
+
+1. **公网 URL + PIN**：要在 dsh-pocket 设置页点「开启公网访问」（会弹免责声明，服务端强制校验）。
+2. **真机**：`adb devices` 当前是空列表，公网验证必须上真机（关 WiFi 走 4G）。
+
+---
+
+## 第 7a 步：连接列表区分落点 ✅
+
+### 为什么做这一步
+
+列表里会同时存在「局域网入口」和「公网隧道入口」，两者指向同一台电脑。
+不区分的话，人在外面点了局域网那条必然打不开，而且看不出为什么。
+
+### 改动
+
+`Endpoint` 增加 `kind: Kind`（`LOOPBACK` / `LAN` / `PUBLIC`），**默认值由 url 推断**，
+所以老的构造点一个字不用改。旁边补两个派生属性：
+
+- `isPublic` —— 公网入口换 Wi-Fi、切 4G 都该用它。
+- `urlIsVolatile` —— quick tunnel 的 `*.trycloudflare.com` 每次重开都变，界面要提示
+  「变了要重新扫码」，否则用户会在列表里反复点一条死链接。
+
+推断规则里的两个坑，都用单测锁住了：
+
+- **CGNAT `100.64/10` 不算私有**。手机在 4G 下常拿到 100.x，但那是运营商内网，
+  连不到家里那台电脑。判成 LAN 会把一条必然打不开的链接标成「局域网」。
+- **IPv4-mapped IPv6 `::ffff:192.168.1.5` 要拆出内嵌的 v4 再判**。
+  只看首字节会掉进「3 不是 fc/fd/fe → 判公网」。
+
+序列化从 4 列扩到 5 列（末列 kind），`deserialize` 对 4 列老数据**降级按 url 推断**，
+无法识别的 kind 值也按 url 重新推断 —— 否则用户升级后连接列表会凭空清空。
+
+### 验证
+
+- `:app:assembleDebug` 通过；`:app:testDebugUnitTest` **tests=24 failures=0 errors=0**
+  （12 → 23 → 24：新增 12 条覆盖网段边界、回环、IPv6 私有、CGNAT、mapped-v6、序列化兼容、易变地址）。
+- APK `7,512,939 B`。
+- 真机验证待 adb 设备接入后补做。
 
 ---
 
@@ -166,4 +226,14 @@ CDP 查出靠的是 `localStorage['dsh.sessions.current']`，与 URL 无关。
 
 ## 下一步
 
-第 7 步仍等 TUN 取舍定下来。知识库已可用，后续本项目开发会走知识优先检索。
+第 7 步的**技术阻塞已解除**（见上），当前只差两件外部输入：
+
+1. 在 dsh-pocket 设置页点「开启公网访问」拿到公网 URL + PIN；
+2. 插上真机（`8PCE7LJB99VG7TRO`），关 WiFi 走 4G 验证公网入口能进 DSH 主界面。
+
+拿到之后的工作：把公网端点存成第二条连接、验证列表里「局域网 / 公网」两条并存时
+点击行为正确、把 `HandshakeHealGate` 在公网首次握手时的表现量一遍。
+
+命名隧道（固定域名）是第 7 步的可选项，需要 Cloudflare 账号 + 自有域名 + Tunnel Token，
+走 `tunnel.setConfig`；它解决的是「地址每次重开都变」这个体验问题，不是可用性问题。
+

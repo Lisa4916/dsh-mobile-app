@@ -445,16 +445,37 @@ class MainActivity : AppCompatActivity() {
                 isClickable = true
                 setOnClickListener { connect(e, persist = true) }
             }
-            row.addView(TextView(this).apply {
+            // 标题行：名字 + 落点标签。标签不是装饰 —— 列表里同时存在局域网与公网
+            // 两条入口指向同一台电脑时，用户得能一眼分出「哪条在家里用、哪条在外面用」。
+            val titleRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+            }
+            titleRow.addView(TextView(this).apply {
                 text = e.label
                 textSize = 16f
                 setTextColor(INK)
             })
+            titleRow.addView(TextView(this).apply {
+                text = kindBadge(e.kind)
+                textSize = 10f
+                setTextColor(kindColor(e.kind))
+                setPadding(dp(8), 0, 0, 0)
+            })
+            row.addView(titleRow)
             row.addView(TextView(this).apply {
                 text = e.url
                 textSize = 12f
                 setTextColor(INK_DIM)
             })
+            if (e.urlIsVolatile) {
+                row.addView(TextView(this).apply {
+                    text = "快速隧道地址每次重开都会变，变了要重新扫码"
+                    textSize = 11f
+                    setTextColor(0xFFB26B00.toInt())
+                    setPadding(0, dp(2), 0, 0)
+                })
+            }
             row.addView(TextView(this).apply {
                 text = "长按删除"
                 textSize = 11f
@@ -481,6 +502,20 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun labelFromUrl(url: String): String = Endpoint.hostOf(url) ?: "电脑"
+
+    /** 列表行上的落点标签。文案要短，一行里还要放得下名字。 */
+    private fun kindBadge(kind: Endpoint.Kind): String = when (kind) {
+        Endpoint.Kind.LAN -> "局域网"
+        Endpoint.Kind.PUBLIC -> "公网"
+        Endpoint.Kind.LOOPBACK -> "本机"
+    }
+
+    /** 局域网用中性灰、公网用品牌蓝、本机用暗灰 —— 只做区分，不做语义暗示。 */
+    private fun kindColor(kind: Endpoint.Kind): Int = when (kind) {
+        Endpoint.Kind.LAN -> INK_DIM
+        Endpoint.Kind.PUBLIC -> 0xFF2F6BFF.toInt()
+        Endpoint.Kind.LOOPBACK -> 0xFF8A90A0.toInt()
+    }
 
     private fun saveAndConnect(url: String) {
         val label = labelFromUrl(url)

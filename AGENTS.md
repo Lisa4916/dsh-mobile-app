@@ -78,14 +78,20 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 | 4 | 键盘避让（WebView 不缩 + 页面 rAF 自驱） | ✅ 见 §5 |
 | 5 | 启动即自动连接，落在 DSH 主界面（document-start 清 `dsh.sessions.current`） | ✅ |
 | 6 | 移除顶部返回键（压住了 DSH 自己的侧边栏按钮） | ✅ |
-| **7** | **公网远程连接（隧道）** | ⬅ **下一步，阻塞中** |
+| **7** | **公网远程连接（隧道）** | 🟡 技术阻塞已解除，待真机 + 公网 URL |
+| 7a | 连接列表区分「局域网 / 公网 / 本机」落点 | ✅ |
 | 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness` | ✅ 见 §10 |
 | 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
 | 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
 
-**第 7 项阻塞点**：`cloudflared.exe` 已缓存在 `C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B），
-但本机开着 Clash/mihomo 且启用 sing-tun 入站规则，会掐断 cloudflared 边缘连接（`error 1033`）。
-待用户决策：关 TUN，或换 cpolar。**没定之前不要动 dsh-pocket 的隧道端点。**
+**第 7 项现状（2026-11-02 重测，旧结论已作废）**：`cloudflared.exe` 在
+`C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B，2026.10.7）。
+**本机现在没有 Clash/mihomo 进程、没有 TUN 网卡、系统代理 `ProxyEnable=0`**，
+cloudflared precheck 全 PASS，quick tunnel 注册成功（`lax11`）且公网返回 200 ——
+「sing-tun 掐断边缘连接（error 1033）」这条旧结论**已经不成立**，不要再照着它关 TUN 或换 cpolar。
+
+剩余阻塞是外部输入，不是技术：① 在 dsh-pocket 设置页点「开启公网访问」拿 URL + PIN；
+② 真机接入（当前 `adb devices` 为空）。
 （端点参考：`tunnel.start` / `tunnel.stop` / `tunnel.setConfig`；`tunnel.start` 必须带 `payload.disclaimer=true`，服务端强制校验。）
 
 ---
@@ -94,11 +100,15 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
 ```
 app/src/main/java/com/dsh/remote/
-├── Endpoint.kt          data class Endpoint(id, label, url, lastUsedAt, host)
-│                        Endpoint.parseUri(raw) → String?（规范化 + 补 scheme）
-│                        Endpoint.hostOf(url) → String?
+├── Endpoint.kt          data class Endpoint(id, label, url, lastUsedAt, kind)
+│                        kind: Kind = LOOPBACK / LAN / PUBLIC，**默认由 url 推断**
+│                        isPublic / urlIsVolatile(quick tunnel 域名会变) 两个派生属性
+│                        parseUri(raw) → String?（规范化 + 补 scheme）
+│                        hostOf(url) → String? / kindOf(url) → Kind
+│                        isPrivateHost 覆盖 10/8、172.16/12、192.168/16、169.254/16、
+│                          fc00::/7、fe80::/10、::ffff:v4；**CGNAT 100.64/10 不算私有**
 │                        EndpointStore(context)：all / upsert / touch / remove / lastUsed
-│                        serialize/deserialize 是行式 TSV（internal，给单测用）
+│                        serialize/deserialize 是行式 TSV（5 列，**4 列老数据要能读**）
 │                        idFor(label, url) 稳定 id
 │                        ⚠ 纯 JDK，不碰 android.net.Uri，原因见 §6.1
 ├── MainActivity.kt      连接列表 + 全屏 WebView + 键盘避让编排 + 生命周期
@@ -114,7 +124,9 @@ app/src/main/java/com/dsh/remote/
 │                        HOME_RESET_JS / KEYBOARD_HOOK_JS 两个常量
 ├── WebBridge.kt         @JavascriptInterface，注入名 "dshNative"
 ├── ScanActivity.kt      CameraX 预览 + ZXing 解码，只认真 http(s) 结果
-└── EndpointTest.kt      12 条单测：解析、序列化往返、脏数据容错、id 稳定性
+└── EndpointTest.kt      24 条单测：解析、序列化往返、脏数据容错、id 稳定性、
+                         入口类型推断（网段边界 / IPv6 私有 / CGNAT / mapped-v4）、
+                         4 列老数据的升级兼容
 ```
 
 `res/values/`：`page_dark = #151517`（**必须与 DSH 页面 body 同色**，见 §6.2）、`surface`、`ink`、`ink_dim`、`brand`。

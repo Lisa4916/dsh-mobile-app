@@ -3,7 +3,8 @@
 > 工程根：`D:\dsh-mobile-app` ｜ 包名 `com.dsh.remote` ｜ 版本 0.1.0
 > 上游依赖（外部、不属于本仓库）：`dsh-pocket` 2.12.0 反向代理 :3081，以及它背后的 `dsh web` :54282
 > 状态：**A 档主体已真机跑通**，进入功能扩展期。当前唯一阻塞项是「公网远程连接」。
-> 「访问验证页自愈」已实现并单测覆盖（第 7b 步），待真机复验（无线调试连接 offline，见 PROGRESS）。
+> 「访问验证页自愈」已实现（第 7b 步）并**在真机上抓到决定性证据**（第 7d 步）：
+> 坏 cookie → 判 `'2'` → 清 `dsh_pocket_token` → 带 `retry+token` 重连 → 进主界面。
 
 ---
 
@@ -42,7 +43,7 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
     -p 'D:\dsh-mobile-app' :app:assembleDebug :app:testDebugUnitTest --console=plain -q
 
 # 安装到真机
-& 'D:\AndroidDev\sdk\platform-tools\adb.exe' -s 8PCE7LJB99VG7TRO install -r `
+& 'D:\AndroidDev\sdk\platform-tools\adb.exe' -s ZY22GHMK5F install -r `
     'D:\dsh-mobile-app\app\build\outputs\apk\debug\app-debug.apk'
 ```
 
@@ -53,7 +54,8 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 | Gradle | `C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat` |
 | AGP / Kotlin | 8.7.3 / 2.0.21 |
 | compileSdk / minSdk / targetSdk | 35 / 24 / 35 |
-| 真机 | Redmi 23054RA19C，Android 15，adb `8PCE7LJB99VG7TRO` |
+| 真机 | **motorola XT2335-3**（`penang`），Android 14 / SDK 34，adb **`ZY22GHMK5F`**，WebView 117.0.5938.60 |
+| 旧真机（作废） | Redmi 23054RA19C / Android 15 / `8PCE7LJB99VG7TRO` —— 已不是主用验证机，`kb/` 与 `CONTEXT-ANCHOR.md` 里的历史环境标注仍指它 |
 | Node（跑 tools/ 脚本） | `C:\Users\yaoqi\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe` |
 
 **Gradle 版本有硬约束**：本机缓存里的 `gradle-9.4.1` 与 AGP 8.7.3 **不兼容**，必须用 8.9。
@@ -81,6 +83,9 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 | 6 | 移除顶部返回键（压住了 DSH 自己的侧边栏按钮） | ✅ |
 | **7** | **公网远程连接（隧道）** | 🟡 技术阻塞已解除，待真机 + 公网 URL |
 | 7a | 连接列表区分「局域网 / 公网 / 本机」落点 | ✅ |
+| 7b | 「访问验证」页自愈 | ✅ 见 §6.13 |
+| 7c | 真机无线调试接入 | ❌ 放弃（配对成功但恒 offline，改走 USB） |
+| 7d | 真机 USB 接入 + 第 7b 步真机复验 | ✅ |
 | 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness` | ✅ 见 §10 |
 | 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
 | 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
@@ -91,9 +96,9 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 cloudflared precheck 全 PASS，quick tunnel 注册成功（`lax11`）且公网返回 200 ——
 「sing-tun 掐断边缘连接（error 1033）」这条旧结论**已经不成立**，不要再照着它关 TUN 或换 cpolar。
 
-剩余阻塞是外部输入，不是技术：① 在 dsh-pocket 设置页点「开启公网访问」拿 URL + PIN；
-② 真机接入（当前 `adb devices` 为空）。
+剩余阻塞是外部输入，不是技术：① 在 dsh-pocket 设置页点「开启公网访问」拿 URL + PIN。
 （端点参考：`tunnel.start` / `tunnel.stop` / `tunnel.setConfig`；`tunnel.start` 必须带 `payload.disclaimer=true`，服务端强制校验。）
+（真机已接入：`adb devices` 现在有 `ZY22GHMK5F`，走 USB。）
 
 ---
 
@@ -234,6 +239,41 @@ CSS px × `(1080 / window.innerWidth)` = ×2.748。用 CSS 值直接点会全部
 ### 6.12 写文件后必须回读
 曾误删 `WebViewFactory.kt` 里 `override fun shouldOverrideUrlLoading(` 的签名行，还把 `webViewClient` 覆盖成空对象。
 
+### 6.13 「访问验证」页自愈的三条铁律（真机验过，别再踩）
+
+**根因在上游**：`dsh-pocket` 的 `lib/proxy.mjs:509-525` `maybeSeedAuthCookie` 第一行就是
+`if (parseCookies(req.headers.cookie)[TOKEN_COOKIE]) return;` ——
+**只要请求里带一个哪怕已失效的 `dsh_pocket_token`，代理就永不下发新的。**
+而它的值是 `sha256(PIN:sessionKey)`，`sessionKey` 是 dsh web 的进程级随机数
+（`lib/index.js:331-333`，不落盘），Harness 每重启一次就换新 → 手机上那枚必然失配。
+表现就是「URL 里带着 token，却还是停在访问验证页」。
+
+1. **只有 URL 的 query 里确实还带 `?token=` 时，才允许清 `dsh_pocket_token`。**
+   没有 token 就清，用户被永久锁死在那个页面外 —— 它没有密码输入框。
+   由 `RecoveryPlanner.plan()` 的 `ASK_USER` 分支守住，单测钉死。
+2. **`dsh-pocket-retry=1` 必须插在 `#` 之前。** 拼到末尾会落进 fragment，
+   服务端收不到，握手计数（按客户端 IP，3 次/60 秒）清不掉，重连撞 503「无法完成登录握手」。
+3. **验证必须"同一进程内"做。** `Network.setCookie` 只写进 WebView 活的 cookie store；
+   杀进程后 WebView 从磁盘 Cookies 库恢复旧的好值，「重启 App」这个动作反而把故障抹掉，
+   于是「看起来自愈成功了」其实是假象。
+   → 用 `tools/verify-selfheal-net.cjs`：同一条 CDP 连接里弄脏 → `Page.navigate` → 抓网络事件，
+   判据是「出现同时带 `dsh-pocket-retry` 与 `token=` 的那一跳」。
+
+### 6.14 截图：PowerShell 重定向会毁掉 PNG
+`adb exec-out screencap -p > file.png` 会把 PNG 里的 LF 改成 CRLF，产出坏图
+（`read_image` 报 `Unsupported or malformed image data`）。
+必须 `adb shell screencap -p /sdcard/shot.png` 再 `adb pull`。
+
+### 6.15 真机换了台，别照着旧序列号敲
+当前验证机是 **motorola XT2335-3 / Android 14 / `ZY22GHMK5F`**，WebView **117.0.5938.60**。
+旧记录里的 `8PCE7LJB99VG7TRO`（Redmi Note 12T Pro / Android 15）不是主用机。
+`POLYFILL_JS` 之所以存在，正是因为这台机器 WebView 只有 117（缺 `Promise.withResolvers`）。
+
+### 6.16 无线调试（`adb pair`）在这台 Windows 上走不通
+配对能成功拿 `guid`，但 `adb connect` 恒 `offline`；全端口扫描只有 `51688` 一个口开放且
+配对前后一致（不像临时端口）；mDNS 发现也因为 UDP 5353 被 `svchost` 与 adb 自己抢而不可靠。
+**用 USB。** 别在这条路上继续投时间。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）
@@ -250,6 +290,9 @@ CSS px × `(1080 / window.innerWidth)` = ×2.748。用 CSS 值直接点会全部
 | `probe-composer.cjs` | 探 composer 祖先链的 transition / animation / transform / flexGrow / visualViewport |
 | `tap-composer.cjs` | 取 composer CSS 坐标 + 密度换算 + adb tap，含点前后状态 |
 | `sample-viewport.cjs` | 页面内 rAF 采样 innerH / composerTop 变化点 |
+| `simulate-stale-cookie.cjs` | `dump` 列 cookie（httpOnly/domain）；`stale` 把 `dsh_pocket_token` 写成 `deadbeef`×8 造故障 |
+| `verify-selfheal.cjs` | 同一进程内「弄脏 → 导航 → 逐秒采样页面」，给 ✅/❌ |
+| `verify-selfheal-net.cjs` | **判定力最强**：抓 `Network.requestWillBeSent`，识别同时带 `dsh-pocket-retry` 与 `token=` 的那一跳（§6.13） |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 

@@ -17,7 +17,9 @@
 | 6 | 移除顶部返回键 | ✅ | 交给系统返回键 |
 | 7 | 公网远程连接（隧道） | 🟡 阻塞已解，待真机 | 见下 |
 | 7a | 连接列表区分「局域网 / 公网 / 本机」落点 | ✅ | `tests=24 failures=0`（EndpointTest） |
-| 7b | 「访问验证」页自愈：清失效 `dsh_pocket_token` 后带 token 重连 | ✅ | 全量 `tests=59 failures=0` |
+| 7b | 「访问验证」页自愈：清失效 `dsh_pocket_token` 后带 token 重连 | ✅ | 全量 `tests=59 failures=0` + 真机抓包实证 |
+| 7c | 真机无线调试接入 | ❌ 放弃 | 配对成功但 connect 恒 offline |
+| 7d | 真机 USB 接入 + 第 7b 步真机复验 | ✅ | CDP 抓到 `retry+token` 重连并恢复主界面 |
 | 8 | 手机软件开发知识库（5 篇种子文档入库 + 挂载） | ✅ | entries/documents/fts = 5/5/5 |
 
 **测试基线：全量 `tests=59 failures=0 errors=0 skipped=0`**
@@ -265,7 +267,7 @@ GET /?token=PIN → 200 「正在进入」（认证通过）
 
 ---
 
-## 第 7c 步：真机无线调试接入（未完成）
+## 第 7c 步：真机无线调试接入 ❌ 已放弃
 
 用户在手机开了无线调试。排查过程：
 
@@ -279,10 +281,69 @@ GET /?token=PIN → 200 「正在进入」（认证通过）
 5. 但 `adb connect 192.168.50.138:51688` **一直是 `offline`**；
    `kill-server` / `reconnect offline` / 重扫端口都无效，手机侧始终只有 51688 一个端口。
 
-**卡点判断**：配对成功（信任关系已建立），但连接端口协商不成功。
-51688 在配对前后的全端口扫描里都稳定开放，说明它不是配对时随机分配的临时端口。
-下一步需要用户在手机「无线调试」页面直接读出 `IP:端口`（那才是当前 connect 端口，
-与配对端口不同），或改用 USB 线接入。
+**放弃理由**：配对成功（信任关系已建立），但连接端口协商不成功；`51688` 在配对前后
+稳定开放，不像配对时随机分配的临时端口。改用 USB 后一次成功（见 7d），
+**无线调试这条路不再投入**——真要远程调试时再看 Android 15+ 的 `adb pair` 新流程。
+
+---
+
+## 第 7d 步：真机 USB 接入 + 第 7b 步自愈真机复验 ✅
+
+### 设备身份（旧记录是另一台手机）
+
+| 项 | 旧记录（作废） | 实测（有效） |
+|---|---|---|
+| 型号 | Redmi 23054RA19C（Note 12T Pro） | **motorola XT2335-3**（`penang`） |
+| 系统 | Android 15 / SDK 35 | **Android 14 / SDK 34** |
+| adb 序列号 | `8PCE7LJB99VG7TRO` | **`ZY22GHMK5F`** |
+| WebView | 随系统较新 | **117.0.5938.60**（这就是 `POLYFILL_JS` 的来源） |
+
+USB 接入即 `ZY22GHMK5F  device`，与之前无线配对得到的 `adb-ZY22GHMK5F-xFoQoe` 是同一台。
+`install -r` → `Success`，`am start` → 约 8 秒后落在「探索未至之境」主界面。
+
+### 截图踩坑（新增）
+
+`adb exec-out screencap -p > file.png` 在 PowerShell 里会把 PNG 的 LF 改成 CRLF，
+产出 217,986 B 的坏图（`read_image` 报 `Unsupported or malformed image data`）。
+**必须** `adb shell screencap -p /sdcard/shot.png` 再 `adb pull`。
+
+### 验证方法：为什么必须"同一进程内"
+
+第一版尝试是「CDP 弄脏 cookie → `am force-stop` + `am start` → 看是否恢复」，**结论无效**：
+`Network.setCookie` 只保证写进 WebView **活的** cookie store，杀进程后 WebView 从磁盘
+Cookies 库恢复，那里还是旧的好值 —— 于是「重启 App」反而把故障抹掉了。
+
+改为同一进程内做：`verify-selfheal-net.cjs` 在一条 CDP 连接里
+「弄脏 cookie → `Page.navigate` → 采集 30 秒网络事件」。
+
+### 决定性证据（CDP 抓到的 Document 级请求序列）
+
+```
+原始 dsh_pocket_token = bf66ff652862b546…
+已弄脏            -> deadbeefdeadbeef…
+
+1. http://192.168.50.58:3081/                                   200
+2. http://192.168.50.58:3081/?token=60111186&dsh-pocket-retry=1  200  ← 自愈重连
+3. http://192.168.50.58:3081/                                   200
+
+FINAL  title = DeepSeek Harness
+       body  = "导出会话日志 探索未至之境 预览版 默认工作区 标准模式 …"
+       token = bf66ff652862b546…   ← 被重新下发，不再是死值
+```
+
+第 1 跳带着坏 cookie 落到「访问验证」→ `HEAL_PROBE_JS` 判 `'2'`（`PIN_REQUIRED`）→
+`RecoveryPlanner` 给出 `CLEAR_POCKET_COOKIE`（因为 URL 里确实有 `?token=`）→
+清 `dsh_pocket_token` → 带 `dsh-pocket-retry=1` 重导航 → 第 2 跳拿到新 cookie → 第 3 跳进主界面。
+
+**自愈重连请求出现 = 是 ✅ ；cookie 被重新下发 = 是 ✅**
+
+### 新增工具
+
+| 脚本 | 用途 |
+|---|---|
+| `tools/simulate-stale-cookie.cjs` | `dump` 列 cookie（含 httpOnly/domain）；`stale` 把 `dsh_pocket_token` 写成 `deadbeef`×8 |
+| `tools/verify-selfheal.cjs` | 同一进程内「弄脏 → 导航 → 逐秒采样页面」，给 ✅/❌ |
+| `tools/verify-selfheal-net.cjs` | **判定力最强**：抓 `Network.requestWillBeSent`，识别同时带 `dsh-pocket-retry` 与 `token=` 的那一跳 |
 
 ---
 
@@ -328,12 +389,16 @@ GET /?token=PIN → 200 「正在进入」（认证通过）
 
 ## 下一步
 
-1. **真机验证第 7b 步自愈**：需要有效的 adb 连接（USB 线，或从手机「无线调试」页读出当前 `IP:端口`）。
-   验证手法：进 App 后手动把 `dsh_pocket_token` 改成垃圾值，看是否自动恢复进主界面。
+1. ~~真机验证第 7b 步自愈~~ ✅ 已完成（第 7d 步，CDP 抓到 `retry+token` 重连）。
 2. **第 7 步公网远程连接**：技术阻塞已解除，只差在 dsh-pocket 设置页点「开启公网访问」
    拿到公网 URL + PIN，然后关 WiFi 走 4G 验证。
 3. 拿到公网端点后：把它存成第二条连接、验证列表里「局域网 / 公网」两条并存时点击行为正确、
-   把 `HandshakeHealGate` 在公网首次握手时的表现量一遍。
+   把 `HandshakeHealGate` 在公网首次握手时的表现量一遍（公网首次握手走的是 POST 登录路径，
+   与局域网 `?token=` 路径不同，值得单独量）。
+4. **断网重连 / Wi-Fi→4G 切换**场景下自愈的表现还没量过；`urlIsVolatile` 那类
+   quick tunnel 地址换了之后的表现也没量。
+5. 真机身份已更正为 `ZY22GHMK5F`（motorola XT2335-3 / Android 14），
+   后续验证以这台为准；Redmi 那台的记录只在 `kb/` 与 `CONTEXT-ANCHOR.md` 的历史环境标注里保留。
 
 命名隧道（固定域名）是第 7 步的可选项，需要 Cloudflare 账号 + 自有域名 + Tunnel Token，
 走 `tunnel.setConfig`；它解决的是「地址每次重开都变」这个体验问题，不是可用性问题。

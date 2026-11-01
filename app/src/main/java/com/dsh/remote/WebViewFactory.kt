@@ -61,6 +61,9 @@ object WebViewFactory {
             override fun onPageFinished(view: WebView, url: String?) {
                 // 页面就绪后再注入回调函数：太早注入会被页面自身的导航覆盖掉
                 view.evaluateJavascript(KEYBOARD_HOOK_JS, null)
+                // 兜底复查：页面可能已经把焦点放在输入框上（点侧边栏进会话就是这条路径），
+                // 造成底部那条键盘区凭空让位。轮询几次，因为聚焦时机在半秒到一秒之间浮动。
+                scheduleFocusSweep(view)
                 host.onPageFinished(url)
             }
 
@@ -80,6 +83,12 @@ object WebViewFactory {
             override fun onProgressChanged(view: WebView, newProgress: Int) {
                 host.onProgress(newProgress)
             }
+
+            // onReceivedTitle 属于 WebChromeClient（不是 WebViewClient）：用于识别
+            // dsh-pocket 的「无法完成登录握手」提示页并自愈，见 MainActivity.onReceivedTitle
+            override fun onReceivedTitle(view: WebView, title: String?) {
+                host.onReceivedTitle(title)
+            }
         }
 
         // 底色必须与 DSH 页面 body 实测色一致（CDP: rgb(21,21,23)）。
@@ -94,10 +103,118 @@ object WebViewFactory {
         installHomeResetOnStart(wv)
 
         // 原生桥：页面可查键盘高度（见 WebBridge 注释）
-        wv.addJavascriptInterface(WebBridge(host), "dshNative")
+        wv.addJavascriptInterface(WebBridge(host), JS_BRIDGE_NAME)
 
         return wv
     }
+
+    /**
+     * 注入给页面的 JS 桥对象名。
+     *
+     * 抽成常量是为了 `onDestroy` 里能用同一个名字 `removeJavascriptInterface`
+     * —— 名字写两处、改一处忘另一处的话，卸载就静默失效了。
+     */
+    const val JS_BRIDGE_NAME = "dshNative"
+
+    /**
+     * 输入框自动聚焦守卫。
+     *
+     * 用户要的行为：「进入会话不用直接开启键盘区，点了输入框才开」。
+     *
+     * 病灶：DSH 前端在会话页渲染完就把焦点抢到输入框上（真机实测 `document.activeElement`
+     * 就是 `.GRgSLq_input`），底部那条键盘区在用户什么都没点的情况下已经让出 321px。
+     *
+     * 判法必须精确到**触摸落点**，不能只看「这段时间里有没有摸过屏幕」。
+     * 上一版就是后者，结果漏了一个真实场景：用户点左侧工作区里的某个会话 —
+     * 那也是一次触摸，于是给了许可，页面紧接着自动聚焦输入框被放行，
+     * 键盘区照样拉起来了。用户的原话是「在左侧工作区点入某个对话还是拉起键盘区」。
+     *
+     * 所以现在：只有**触摸点落在某个输入框的矩形内**才发许可，且许可是**一次性**的
+     * （focusin 用掉就清），过期时间也压短到 1 秒 —— 点完输入框之后再来的自动聚焦
+     * 一律照旧回退。
+     *
+     * 用矩形包含判断而不是 `elementFromPoint`：后者受 pointer-events、遮罩层影响，
+     * 而且对 adb 合成的触摸不稳；矩形判断只依赖几何，可靠得多。
+     *
+     * 必须在 document-start 注册：等到 onPageFinished 时页面已经聚焦过了。
+     */
+    private const val FOCUS_GUARD_JS = """
+        (function(){
+          if (window.__dshFocusGuard) return;
+          window.__dshFocusGuard = true;
+
+          var allowUntil = 0;
+
+          function isTextField(el){
+            if (!el) return false;
+            if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return true;
+            return el.isContentEditable === true;
+          }
+
+          /**
+           * 触摸点是否真的点在这个输入框上。
+           *
+           * 不能只做矩形包含判断 —— 真机上复现过这个坑：点左侧工作区里某个会话时，
+           * 手指坐标 (126,533) 恰好压在**下层**输入框的矩形里（输入框 y 484~536、x 16~366），
+           * 于是被误判成「用户点了输入框」，许可发出去，页面随后自动聚焦，键盘区就被拉起来了。
+           *
+           * 侧栏是浮在上面的，所以必须问「这一点的最顶层元素是谁」。
+           * elementFromPoint 早先被认为对 adb 合成触摸不稳，问题其实出在别处（坐标单位），
+           * 这里坐标已经是 CSS 像素，可以直接用。
+           */
+          function pointHitsTextField(x, y){
+            if (typeof x !== 'number' || typeof y !== 'number') return false;
+            if (!document.elementFromPoint) return false;
+
+            // 从命中的最顶层元素往外走几层，看是否落在某个输入框里
+            var el = document.elementFromPoint(x, y);
+            for (var i = 0; i < 5 && el; i++) {
+              if (isTextField(el)) return true;
+              el = el.parentElement;
+            }
+            return false;
+          }
+
+          function onDown(e){
+            // 坐标来源要挑准：adb 合成的触摸里，touchstart 的 clientX/Y 会是 0,0
+            // （真机实测 `touchstart@0,0` 而同一个手势的 `pointerdown@193,825` 才是对的），
+            // 拿 0,0 去问 elementFromPoint 只会得到左上角那个元素，判定必然错。
+            // 所以优先用 pointer/mouse 事件的坐标，touch 坐标只在它是有效值时才采信。
+            var x = null, y = null;
+            if (typeof e.clientX === 'number' && typeof e.clientY === 'number' && (e.clientX || e.clientY)) {
+              x = e.clientX; y = e.clientY;
+            } else if (e.touches && e.touches[0] && (e.touches[0].clientX || e.touches[0].clientY)) {
+              x = e.touches[0].clientX; y = e.touches[0].clientY;
+            } else if (e.changedTouches && e.changedTouches[0]) {
+              x = e.changedTouches[0].clientX; y = e.changedTouches[0].clientY;
+            }
+            if (x === null || y === null) return;
+            if (!pointHitsTextField(x, y)) return;
+            // 一次性许可：1 秒内有效，focusin 拿到就作废
+            allowUntil = Date.now() + 1000;
+            window.__dshFocusGuardLastHit = { x: x, y: y, at: Date.now() };
+          }
+
+          ['pointerdown','touchstart','mousedown'].forEach(function(ev){
+            window.addEventListener(ev, onDown, true);
+          });
+
+          document.addEventListener('focusin', function(e){
+            var t = e.target;
+            if (!isTextField(t)) return;
+            if (Date.now() < allowUntil) {
+              allowUntil = 0; // 用掉即作废，后面的自动聚焦不再放行
+              return;
+            }
+            // 非「点输入框」引发的聚焦 → 立刻回退，别让页面为键盘让位
+            try {
+              t.blur();
+              var sel = window.getSelection && window.getSelection();
+              if (sel && sel.removeAllRanges) sel.removeAllRanges();
+            } catch (err) {}
+          }, true);
+        })();
+    """
 
     /**
      * 注册「开机落主界面」的 document-start 脚本。
@@ -112,8 +229,196 @@ object WebViewFactory {
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
         runCatching {
             WebViewCompat.addDocumentStartJavaScript(wv, HOME_RESET_JS, setOf("*"))
+            // 输入框自动聚焦守卫必须也走 document-start：DSH 在会话页渲染完成时就会
+            // 把焦点抢到输入框上，等到 onPageFinished 再注入已经晚了 —— 那时页面
+            // 早就为键盘让出过位（真机实测 rootH 574 / kb 321px，而键盘其实没弹）。
+            WebViewCompat.addDocumentStartJavaScript(wv, FOCUS_GUARD_JS, setOf("*"))
+            // 新 API 缺失补丁必须也是 document-start：DSH 前端模块在初始化时就会调用
+            // Promise.withResolvers，晚一步注入等于没注入（页面已经抛异常停在那儿了）。
+            WebViewCompat.addDocumentStartJavaScript(wv, POLYFILL_JS, setOf("*"))
         }
     }
+
+    /**
+     * 给旧系统 WebView 补上 DSH 前端依赖的新 API。
+     *
+     * 起因（第二台设备 XT2335-3 / Android 14 实测）：系统 WebView 只有
+     * **117.0.5938.60**，而 DSH 前端用到了 Chrome 119 才有的 `Promise.withResolvers`。
+     * 表现不是白屏，而是页面能画出来、却卡在「正在加载工作区…」，logcat 里反复看到：
+     *     Uncaught TypeError: Promise.withResolvers is not a function
+     *     [session-controller] control stream failed: ...
+     *     archive-manager: load favorites failed ... 服务尚未就绪
+     * 也就是说网络与鉴权都是通的（`dsh-auth-*` cookie 正常下发），纯粹是 JS 运行时太旧。
+     *
+     * 在这台设备上实测探测到的缺失项只有三个：
+     *     Promise.withResolvers   (Chrome 119+)
+     *     Array.fromAsync         (Chrome 121+)
+     *     RegExp.escape           (Chrome 136+)
+     * 其余 16 个常用新 API（toSorted / toReversed / Object.groupBy / structuredClone /
+     * findLast / AbortSignal.timeout / crypto.randomUUID / Intl.Segmenter …）都已具备。
+     *
+     * 只补这三个，不做大而全的 core-js —— 补丁越小，越不容易和页面自身的行为冲突。
+     * 每一项都先判断「已经有了就跳过」，所以在新设备上这段代码等于空转。
+     */
+    private const val POLYFILL_JS = """
+        (function(){
+          try {
+            if (typeof Promise.withResolvers !== 'function') {
+              // 语义：返回 { promise, resolve, reject }，且 resolve/reject 不依赖 this
+              Promise.withResolvers = function(){
+                var resolve, reject;
+                var promise = new Promise(function(res, rej){ resolve = res; reject = rej; });
+                return { promise: promise, resolve: resolve, reject: reject };
+              };
+            }
+          } catch (e) {}
+
+          try {
+            if (typeof Array.fromAsync !== 'function') {
+              // 语义：对 async iterable / iterable / array-like 逐个 await 后收集
+              Array.fromAsync = function(input, mapFn, thisArg){
+                return (async function(){
+                  var out = [];
+                  var i = 0;
+                  if (input != null && typeof input[Symbol.asyncIterator] === 'function') {
+                    for await (var v of input) {
+                      out.push(mapFn ? await mapFn.call(thisArg, v, i++) : v);
+                    }
+                    return out;
+                  }
+                  var items = input == null ? [] : Array.from(input);
+                  for (var j = 0; j < items.length; j++) {
+                    out.push(mapFn ? await mapFn.call(thisArg, items[j], j) : items[j]);
+                  }
+                  return out;
+                })();
+              };
+            }
+          } catch (e) {}
+
+          try {
+            if (typeof RegExp.escape !== 'function') {
+              // 语义：把字符串转义成可安全嵌入正则的形式；空白与常见元字符都要处理
+              RegExp.escape = function(str){
+                var s = String(str);
+                var out = '';
+                for (var i = 0; i < s.length; i++) {
+                  var c = s.charAt(i);
+                  if ('^$\\.*+?()[]{}|/'.indexOf(c) !== -1) {
+                    out += '\\' + c;
+                  } else if ('\t\n\v\f\r '.indexOf(c) !== -1) {
+                    // 控制字符与空白用 \x 形式表达，避免在字符类里被当成量化目标
+                    out += '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0');
+                  } else {
+                    out += c;
+                  }
+                }
+                return out;
+              };
+            }
+          } catch (e) {}
+        })();
+    """
+
+    /**
+     * 页面就绪后连查几次焦点，把非用户意图的聚焦压下去。
+     *
+     * 时序实测：点侧栏进会话后，约 0.3~0.8 秒内键盘区就被拉起（rootH 574 / kb 321px），
+     * 而聚焦具体落在哪一拍并不稳定。所以取一组递增延迟 0.2/0.5/0.9/1.4 秒各查一次，
+     * 每次都是一句 JS 求值，开销可以忽略。
+     */
+    private fun scheduleFocusSweep(view: WebView) {
+        longArrayOf(200L, 500L, 900L, 1_400L).forEach { delay ->
+            view.postDelayed({
+                if (view.isAttachedToWindow) {
+                    view.evaluateJavascript(FORCE_BLUR_IF_UNTOUCHED_JS, null)
+                }
+            }, delay)
+        }
+    }
+
+    /**
+     * 页面就绪后的兜底：若焦点停在输入框上、且不是用户刚点过的，就强制失焦。
+     *
+     * 为什么要轮询而不是查一次：点侧栏进会话是**同页内视图切换**，新视图挂载、
+     * 自动聚焦的时机并不固定在 onPageFinished 后 250ms —— 实测会在半秒到一秒之间
+     * 陆续发生。查一次很容易扑空，查几次成本几乎为零（一次 JS 求值）。
+     *
+     * 判定同样只看「用户最近是否点过输入框」：页面把每次合法点击记录在
+     * `__dshFocusGuardLastHit`，这里比对时间戳即可。
+     */
+    const val FORCE_BLUR_IF_UNTOUCHED_JS = """
+        (function(){
+          try {
+            var ae = document.activeElement;
+            if (!ae) return '0';
+            var isField = ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT' || ae.isContentEditable === true;
+            if (!isField) return '0';
+            var hit = window.__dshFocusGuardLastHit;
+            // 2 秒内有过「点输入框」的记录 → 这是用户自己要的，不动
+            if (hit && Date.now() - hit.at < 2000) return '0';
+            ae.blur();
+            var sel = window.getSelection && window.getSelection();
+            if (sel && sel.removeAllRanges) sel.removeAllRanges();
+            // 焦点清掉后，页面可能还留有键盘让位留下的高度，一并复位
+            var r = document.getElementById('root');
+            if (r && r.style.height) r.style.height = '';
+            document.documentElement.style.setProperty('--dsh-native-keyboard', '0px');
+            return '1';
+          } catch (e) { return '0'; }
+        })();
+    """
+
+    /**
+     * 检查当前是否停在 DSH 的「开始界面」（会话列表/首页），并返回状态字符串。
+     *
+     * 返回值约定：
+     *  - `"home"`：在开始界面
+     *  - `"session"`：在某个会话里
+     *  - `"other"`：还没加载完 / 认不出（调用方应当不动手）
+     *
+     * 判据全部取自真机实测的正文特征：
+     *  - 开始界面含「探索未至之境」+「描述你想要构建的内容」（首页 hero 区）
+     *  - 会话页含「对话」「轨迹」两个 tab（首页没有这对 tab）
+     *
+     * 为什么不用 `history.length` / URL：DSH 是纯 SPA，实测进会话后
+     * `location.href` 与 `history.length` **都不变**（进会话前后都是 2），
+     * 所以 WebView 的历史栈里根本没有「会话」这一层，`canGoBack()` 拿不到它。
+     */
+    const val DSH_LOCATION_JS = """
+        (function(){
+          try {
+            var b = (document.body ? document.body.innerText : '') || '';
+            if (b.length === 0) return 'other';
+            var hasHero = b.indexOf('探索未至之境') !== -1;
+            var hasComposer = b.indexOf('描述你想要构建的内容') !== -1
+                           || b.indexOf('发消息或创建任务') !== -1
+                           || b.indexOf('选择一个工作区开始') !== -1;
+            var hasSessionTabs = b.indexOf('对话') !== -1 && b.indexOf('轨迹') !== -1;
+            if (hasSessionTabs) return 'session';
+            if (hasHero || hasComposer) return 'home';
+            return 'other';
+          } catch (e) { return 'other'; }
+        })();
+    """
+
+    /**
+     * 把 DSH 退回开始界面（会话列表/首页）。
+     *
+     * 做法是清掉会话恢复键再重载：`dsh.sessions.current` 是 DSH 唯一记着
+     * 「上次打开哪个会话」的地方，清掉后重载必然落到开始界面 —— 真机实测有效。
+     *
+     * 为什么不用 `history.back()` / `goBack()`：DSH 不往 WebView 历史栈里压条目
+     * （进会话前后 history.length 都是 2，href 也不变）。实测按系统返回键触发
+     * `goBack()` 的结果是**整页重载并回到同一个会话**（因为会话键还在），
+     * 用户看到的是「原地刷新」，不是后退。
+     */
+    const val DSH_GO_HOME_JS = """
+        (function(){
+          try { localStorage.removeItem('dsh.sessions.current'); } catch (e) {}
+          try { location.reload(); } catch (e) {}
+        })();
+    """
 
     /**
      * 开机落主界面：清掉 DSH 的会话恢复键。
@@ -153,6 +458,12 @@ object WebViewFactory {
      * 曲线用 `1-(1-t)^5`，不是拍脑袋：MIUI 输入法窗口走系统传统窗口动画
      * （`wanim=0x01030056` → `res/anim/input_method_enter.xml`，duration=300，
      * interpolator=`decelerate_quint` factor=2.5 → `1-(1-t)^5`）。
+     *
+     * 另外这一段还挡掉了「进入会话就自动聚焦输入框」：DSH 前端在会话页会把焦点
+     * 抢到输入框上，于是用户什么都没点，底部就已经为键盘让出了 321px 的空白
+     * （真机实测：`rootH` 574 / `--dsh-native-keyboard` 321px，而 `mInputShown=false`）。
+     * 用户要的是「点输入框才开键盘」，所以这里把非用户手势触发的 focus 一律回退，
+     * 只放行真实触摸之后的那一次 —— 见下面 __dshAllowFocus 的注释。
      */
     private const val KEYBOARD_HOOK_JS = """
         (function(){

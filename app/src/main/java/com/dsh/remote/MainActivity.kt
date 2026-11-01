@@ -5,18 +5,18 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.view.KeyEvent
 import android.view.View
+import android.webkit.CookieManager
 import android.webkit.WebView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -46,6 +46,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var progress: ProgressBar
 
     private var current: Endpoint? = null
+
+    /** 登录握手自愈的闸门，见 healHandshakeIfNeeded。 */
+    private val handshakeHeal = HandshakeHealGate()
 
     /** 最近一次 IME insets 报告的键盘高度（px），供 WebBridge 查询。 */
     internal var currentKeyboardHeight: Int = 0
@@ -97,6 +100,7 @@ class MainActivity : AppCompatActivity() {
         store = EndpointStore(this)
         setContentView(buildUi())
         applyImeInsets()
+        installBackHandling()
         refreshSavedList()
 
         // 启动即进主界面：不停留在连接列表，直接在后台把 WebView 连上去。
@@ -488,6 +492,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun connect(endpoint: Endpoint, persist: Boolean) {
         current = endpoint
+        handshakeHeal.reset()
         if (persist) applyList(store.touch(endpoint.id))
 
         listRoot.visibility = View.GONE
@@ -528,6 +533,99 @@ class MainActivity : AppCompatActivity() {
 
     internal fun onPageFinished(url: String?) {
         progress.visibility = View.GONE
+        healHandshakeIfNeeded(url)
+        // 复查一次：探测可能被「刚动过手」的静默期挡掉（页面还在过渡稿），
+        // 这时代码就再也收不到「已恢复」的信号，闸门会一直以为还在同一轮故障里。
+        // 延迟到静默期之后再探一次，保证健康状态一定能被记录。
+        if (handshakeHeal.needsHealthyConfirmation()) {
+            webView.postDelayed({
+                if (!isFinishing && !isDestroyed) healHandshakeIfNeeded(url)
+            }, HandshakeHealGate.PROBE_QUIET_AFTER_ACT_MS + 200L)
+        }
+    }
+
+    /**
+     * 标题到达时也试一次自愈：dsh-pocket 的 503 失败页只有几百字节，onPageFinished
+     * 往往比标题回调晚一拍；标题里已经带了「无法完成登录握手」，早点修能少一次白屏。
+     */
+    internal fun onReceivedTitle(title: String?) {
+        if (title != null && title.contains("无法完成登录握手")) healHandshakeIfNeeded(null)
+    }
+
+    /**
+     * dsh-pocket 登录握手自愈。
+     *
+     * 现象：DSH 重启后 `dsh web` 端口会变（实测 54282 → 17169）。dsh-pocket 会把**新**的
+     * launch token 补进请求，上游回 303 下发 `dsh-auth-*` cookie，于是本该无缝。
+     * 但 WebView 里若已经存着**旧端口**签发的 `dsh-auth-*` cookie（authority 字段写的
+     * 是旧端口），代理判定「已有 cookie、不需要补 token」，直接把请求转上去 → 上游不认
+     * 这个 cookie → 401 → 页面只剩一行 "dsh web authentication required"。
+     * 连续失败 3 次后代理进入 60 秒限流，回 503「无法完成登录握手」。
+     *
+     * 判据（三选一即触发）：
+     *  1. 页面标题是握手失败页的标题；
+     *  2. 正文出现 dsh web 的裸 401 文案；
+     *  3. 标题含 DSH Pocket 且正文含「握手」（过渡页/失败页的兜底形态）。
+     *
+     * 做法：**只清 dsh-auth-\* 会话 cookie**，再带 `dsh-pocket-retry=1` 重新导航（该参数会清掉
+     * 代理侧的失败计数，见 dsh-pocket/lib/proxy.mjs:928）。
+     *
+     * 为什么不能 removeAllCookies()：WebView 里除了 dsh-auth-* 还有 dsh_pocket_token ——
+     * 那是用户输入 PIN 换来的局域网会话。全部清掉等于把用户踢回「访问验证」页，
+     * 而那个页面里没有 PIN 可填（用户早忘了），表现就是「自愈之后彻底进不去了」。
+     * 这个坑在真机上实测复现过：清完 cookie 页面变成「DSH Pocket · 访问验证」。
+     */
+    private fun healHandshakeIfNeeded(url: String?) {
+        if (!handshakeHeal.mayProbe()) return
+        val target = current ?: return
+        webView.evaluateJavascript(HEAL_PROBE_JS) { raw ->
+            if (raw == null || raw.trim('"') != "1") {
+                // 页面正常：解除「本次已动手」的锁定，将来再坏还能自动修。
+                // 这一步很关键 —— 没有它，第一次自愈成功后 done 永远为真，
+                // DSH 下次重启改端口还得手动重启 App。
+                handshakeHeal.onHealthy()
+                return@evaluateJavascript
+            }
+            // 故障态确认了，但本次已经动手过就停在这里：重载后的失败页会再次走到这段，
+            // 若继续动手就是无限刷新。
+            if (!handshakeHeal.mayAct()) {
+                android.util.Log.i("DshRemote", "handshake broken but already healed once, waiting for user")
+                return@evaluateJavascript
+            }
+            android.util.Log.i("DshRemote", "handshake broken, clearing ONLY dsh-auth-* and retrying")
+            handshakeHeal.onActed()
+            clearAuthCookies(target)
+            val retry = appendRetryParam(target.url)
+            runOnUiThread {
+                webView.loadUrl(retry)
+                toast("已重新建立与电脑的连接")
+            }
+        }
+    }
+
+    /**
+     * 只删除 `dsh-auth-*`（上游会话），保留 `dsh_pocket_token`（局域网 PIN 会话）。
+     *
+     * Android 的 CookieManager 没有「按名字前缀删」的 API，只能把现有 cookie 取出来、
+     * 对要删的逐个 setCookie 成过期值。删完要 flush()，否则下个请求可能还带旧值。
+     */
+    private fun clearAuthCookies(target: Endpoint) {
+        val cm = CookieManager.getInstance()
+        val origin = target.url
+        val all = cm.getCookie(origin) ?: return
+        all.split(';').forEach { pair ->
+            val name = pair.substringBefore('=').trim()
+            if (name.startsWith(AUTH_COOKIE_PREFIX)) {
+                // 置空 + 过期时间放过去 → 浏览器删除该 cookie
+                cm.setCookie(origin, "$name=; Max-Age=0; Path=/")
+            }
+        }
+        cm.flush()
+    }
+
+    private fun appendRetryParam(url: String): String {
+        val sep = if (url.contains('?')) "&" else "?"
+        return if (url.contains("dsh-pocket-retry=1")) url else url + sep + "dsh-pocket-retry=1"
     }
 
     /** 主页加载失败时不要静默黑屏：留在连接列表并说明原因。 */
@@ -547,24 +645,63 @@ class MainActivity : AppCompatActivity() {
         runCatching { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))) }
     }
 
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_BACK &&
-            this::webView.isInitialized &&
-            webView.visibility == View.VISIBLE
-        ) {
-            if (webView.canGoBack()) {
-                webView.goBack()
-                return true
+    /**
+     * 统一的返回处理：系统返回键与**侧滑手势返回**都走这里。
+     *
+     * 为什么不能继续用 onKeyDown：手势返回（左边缘内滑）由 `OnBackPressedDispatcher`
+     * 派发，根本不产生 KEYCODE_BACK 按键事件，所以旧实现对手势完全失效 ——
+     * 表现为「滑动返回」和「按键返回」行为不一致，甚至手势时直接退出。
+     *
+     * 返回顺序必须与进入顺序相反（后进先出），目标链路是：
+     *     会话页  →  开始界面（会话列表/首页）  →  退出 App
+     * 注意最后一步是**退出 App**，不是回落到 App 自己的连接列表页。
+     *
+     * 难点：DSH 是纯 SPA，进会话后 `location.href` 与 `history.length` 都不变
+     * （实测两者进会话前后都是同一个值），所以 WebView 历史栈里没有「会话」这一层，
+     * `canGoBack()` 指的全是页面级重载，用它做后退只会整页刷新并回到同一个会话。
+     * 因此这里改为问**页面自己**当前在哪一级（见 WebViewFactory.DSH_LOCATION_JS）。
+     */
+    private fun installBackHandling() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                val visible = this@MainActivity::webView.isInitialized &&
+                    webView.visibility == View.VISIBLE
+                if (!visible) {
+                    // 停在连接列表页：这里就退出，别再往下走
+                    finish()
+                    return
+                }
+                webView.evaluateJavascript(WebViewFactory.DSH_LOCATION_JS) { raw ->
+                    val where = BackNavigationDecider.PageLocation.fromRaw(raw)
+                    when (backDecider.decide(isWebViewVisible = true, location = where)) {
+                        BackNavigationDecider.Action.GO_TO_START -> {
+                            backDecider.noteWentBack()
+                            webView.evaluateJavascript(WebViewFactory.DSH_GO_HOME_JS, null)
+                        }
+                        BackNavigationDecider.Action.EXIT_APP -> finish()
+                        BackNavigationDecider.Action.RECOVER_TO_START ->
+                            webView.evaluateJavascript(WebViewFactory.DSH_GO_HOME_JS, null)
+                    }
+                }
             }
-            showList()
-            return true
-        }
-        return super.onKeyDown(keyCode, event)
+        })
     }
+
+    /** 返回决策逻辑（纯 JVM 类，可被单测覆盖，见 BackNavigationDecider）。 */
+    private val backDecider = BackNavigationDecider()
 
     override fun onDestroy() {
         if (this::webView.isInitialized) {
+            // 顺序有讲究：先把 WebView 从视图树摘掉，再断开所有指向本 Activity 的引用，
+            // 最后才 destroy。少做一步都会让 Activity 在配置变更（旋转）后被 WebView
+            // 的 client / JS 接口悄悄持有，表现为「转屏几次后内存持续上涨」。
             root.removeView(webView)
+            webView.webViewClient = android.webkit.WebViewClient()
+            webView.webChromeClient = null
+            webView.removeJavascriptInterface(WebViewFactory.JS_BRIDGE_NAME)
+            webView.stopLoading()
+            webView.loadUrl("about:blank")
+            webView.removeAllViews()
             webView.destroy()
         }
         super.onDestroy()
@@ -590,6 +727,49 @@ class MainActivity : AppCompatActivity() {
          * 而终值一帧就是 885px。取 90 有两倍余量，两头分得开。
          */
         const val KEYBOARD_SNAP_THRESHOLD = 90
+
+        /**
+         * 上游会话 cookie 的名字前缀（dsh web 用 `dsh-auth-<随机串>`）。
+         * 自愈只删这一类，保留 `dsh_pocket_token` 这个局域网 PIN 会话 —— 详见 clearAuthCookies。
+         */
+        const val AUTH_COOKIE_PREFIX = "dsh-auth-"
+
+        /**
+         * 探测页面是否处在「握手失败」状态。返回 "1" 表示需要自愈。
+         *
+         * 判据以**正文**为主，标题只做辅助 —— 这是实测逼出来的结论：
+         * DSH 前端是 SPA，`document.title` 在页面切换后可能滞后或残留。真机调试时遇到过
+         * 「标题还是上一次的失败页标题、正文早已是正常主界面」，若信标题就会无故清掉
+         * 用户 cookie，把人踢回登录页。
+         *
+         * 各形态的真实正文（均取自 dsh-pocket 2.12 / dsh web 0.2.1-rc.5 实测）：
+         *  - 失败页：标题「DSH Pocket · 无法完成登录握手」，正文含「无法完成登录握手」
+         *  - 上游 401：「dsh web authentication required」
+         *  - 正常主界面：含「导出会话日志」/「探索未至之境」
+         *  - PIN 登录页：含「访问密码 | Access PIN」—— 此时清 cookie 无意义
+         *  - 过渡页：标题「DSH Pocket · 正在进入」—— 握手进行中，不能当故障
+         */
+        const val HEAL_PROBE_JS = """
+            (function(){
+              try {
+                var t = (document.title || '');
+                var b = (document.body ? document.body.innerText : '') || '';
+                // 正常主界面：只要认出 DSH 主界面特征就不动手，标题再可疑也不算故障
+                if (b.indexOf('导出会话日志') !== -1) return '0';
+                if (b.indexOf('探索未至之境') !== -1) return '0';
+                // PIN 登录页 / 握手过渡页：都不是「cookie 失效」，清 cookie 没有意义
+                if (b.indexOf('访问密码') !== -1) return '0';
+                if (t.indexOf('访问验证') !== -1) return '0';
+                if (t.indexOf('正在进入') !== -1) return '0';
+                // 真失败：以正文为准
+                if (b.indexOf('无法完成登录握手') !== -1) return '1';
+                if (b.indexOf('dsh web authentication required') !== -1) return '1';
+                // 正文还没渲染出来时，才退回用标题判断失败页
+                if (b.length === 0 && t.indexOf('无法完成登录握手') !== -1) return '1';
+                return '0';
+              } catch (e) { return '0'; }
+            })()
+        """
     }
 }
 

@@ -3,6 +3,7 @@
 > 工程根：`D:\dsh-mobile-app` ｜ 包名 `com.dsh.remote` ｜ 版本 0.1.0
 > 上游依赖（外部、不属于本仓库）：`dsh-pocket` 2.12.0 反向代理 :3081，以及它背后的 `dsh web` :54282
 > 状态：**A 档主体已真机跑通**，进入功能扩展期。当前唯一阻塞项是「公网远程连接」。
+> 「访问验证页自愈」已实现并单测覆盖（第 7b 步），待真机复验（无线调试连接 offline，见 PROGRESS）。
 
 ---
 
@@ -36,7 +37,7 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
-# 构建 + 单测（两条一起跑，基线 tests=12 failures=0）
+# 构建 + 单测（两条一起跑，基线 tests=59 failures=0）
 & 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
     -p 'D:\dsh-mobile-app' :app:assembleDebug :app:testDebugUnitTest --console=plain -q
 
@@ -123,10 +124,20 @@ app/src/main/java/com/dsh/remote/
 │                        背景色 0xFF151517、installHomeResetOnStart()、注入 KEYBOARD_HOOK_JS
 │                        HOME_RESET_JS / KEYBOARD_HOOK_JS 两个常量
 ├── WebBridge.kt         @JavascriptInterface，注入名 "dshNative"
+├── RecoveryPlanner.kt   页面坏了该怎么修的决策中心（**纯 JVM，不碰 android.net.Uri**）
+│                        PageState { HEALTHY, HANDSHAKE_BROKEN, PIN_REQUIRED, UNKNOWN }
+│                        RecoveryAction { NONE, CLEAR_UPSTREAM_COOKIE,
+│                                         CLEAR_POCKET_COOKIE, ASK_USER }
+│                        fromProbe('0'/'1'/'2') / plan(state, url) / hasPinToken(url)
+│                        withRetry(url) → 幂等加 dsh-pocket-retry=1，**必须插在 # 之前**
+│                        ⚠ 铁律：URL 里没有 ?token= 时**不许**清 dsh_pocket_token，
+│                          否则用户被永久锁在「访问验证」页外（单测钉住）
 ├── ScanActivity.kt      CameraX 预览 + ZXing 解码，只认真 http(s) 结果
-└── EndpointTest.kt      24 条单测：解析、序列化往返、脏数据容错、id 稳定性、
-                         入口类型推断（网段边界 / IPv6 私有 / CGNAT / mapped-v4）、
-                         4 列老数据的升级兼容
+├── EndpointTest.kt      24 条单测：解析、序列化往返、脏数据容错、id 稳定性、
+│                          入口类型推断（网段边界 / IPv6 私有 / CGNAT / mapped-v4）、
+│                          4 列老数据的升级兼容
+└── RecoveryPlannerTest.kt 14 条单测：fromProbe 映射、plan 分支穷举、hasPinToken
+                           只认 query 里的 token、withRetry 幂等与 fragment 位置
 ```
 
 `res/values/`：`page_dark = #151517`（**必须与 DSH 页面 body 同色**，见 §6.2）、`surface`、`ink`、`ink_dim`、`brand`。

@@ -614,7 +614,8 @@ class MainActivity : AppCompatActivity() {
         if (!handshakeHeal.mayProbe()) return
         val target = current ?: return
         webView.evaluateJavascript(HEAL_PROBE_JS) { raw ->
-            if (raw == null || raw.trim('"') != "1") {
+            val action = RecoveryPlanner.plan(PageState.fromProbe(raw), target.url)
+            if (action == RecoveryAction.NONE) {
                 // 页面正常：解除「本次已动手」的锁定，将来再坏还能自动修。
                 // 这一步很关键 —— 没有它，第一次自愈成功后 done 永远为真，
                 // DSH 下次重启改端口还得手动重启 App。
@@ -624,18 +625,58 @@ class MainActivity : AppCompatActivity() {
             // 故障态确认了，但本次已经动手过就停在这里：重载后的失败页会再次走到这段，
             // 若继续动手就是无限刷新。
             if (!handshakeHeal.mayAct()) {
-                android.util.Log.i("DshRemote", "handshake broken but already healed once, waiting for user")
+                android.util.Log.i("DshRemote", "page broken($action) but already healed once, waiting for user")
                 return@evaluateJavascript
             }
-            android.util.Log.i("DshRemote", "handshake broken, clearing ONLY dsh-auth-* and retrying")
+            if (action == RecoveryAction.ASK_USER) {
+                // 地址里没有 token：清掉 dsh_pocket_token 会把用户永久锁在验证页外，
+                // 那个页面没有密码可填。只提示，不动 cookie。
+                handshakeHeal.onActed()
+                android.util.Log.i("DshRemote", "pin page but url has no token, asking user")
+                runOnUiThread { toast("地址里没有 token，请重新扫码或粘贴完整地址") }
+                return@evaluateJavascript
+            }
             handshakeHeal.onActed()
-            clearAuthCookies(target)
-            val retry = appendRetryParam(target.url)
+            when (action) {
+                RecoveryAction.CLEAR_POCKET_COOKIE -> {
+                    // 残留的失效 dsh_pocket_token 会让 dsh-pocket 拒绝下发新 cookie
+                    // （proxy.mjs:509-525 `maybeSeedAuthCookie` 第一行就 return），
+                    // 于是带着 ?token= 也停在「访问验证」页。清掉它再重新导航即可。
+                    android.util.Log.i("DshRemote", "pin page with token in url, clearing dsh_pocket_token and retrying")
+                    clearPocketCookie(target)
+                }
+                else -> {
+                    android.util.Log.i("DshRemote", "handshake broken, clearing ONLY dsh-auth-* and retrying")
+                    clearAuthCookies(target)
+                }
+            }
+            val retry = RecoveryPlanner.withRetry(target.url) ?: return@evaluateJavascript
             runOnUiThread {
                 webView.loadUrl(retry)
                 toast("已重新建立与电脑的连接")
             }
         }
+    }
+
+    /**
+     * 只删除 `dsh_pocket_token`（dsh-pocket 的局域网 PIN 会话），保留 `dsh-auth-*`。
+     *
+     * **只有 URL 的 query 里确实还带着 `?token=` 时才允许调用**（判据在
+     * [RecoveryPlanner.plan]，单测钉住了）。带着 token 重新导航，代理会立刻用
+     * `maybeSeedAuthCookie` 下发一枚新的、与当前 sessionKey 匹配的 cookie。
+     * 没有 token 就删，用户会被锁在「访问验证」页外 —— 那里没有密码可填。
+     */
+    private fun clearPocketCookie(target: Endpoint) {
+        val cm = CookieManager.getInstance()
+        val origin = target.url
+        val all = cm.getCookie(origin) ?: return
+        all.split(';').forEach { pair ->
+            val name = pair.substringBefore('=').trim()
+            if (name == POCKET_COOKIE) {
+                cm.setCookie(origin, "$name=; Max-Age=0; Path=/")
+            }
+        }
+        cm.flush()
     }
 
     /**
@@ -656,11 +697,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
         cm.flush()
-    }
-
-    private fun appendRetryParam(url: String): String {
-        val sep = if (url.contains('?')) "&" else "?"
-        return if (url.contains("dsh-pocket-retry=1")) url else url + sep + "dsh-pocket-retry=1"
     }
 
     /** 主页加载失败时不要静默黑屏：留在连接列表并说明原因。 */
@@ -771,7 +807,20 @@ class MainActivity : AppCompatActivity() {
         const val AUTH_COOKIE_PREFIX = "dsh-auth-"
 
         /**
-         * 探测页面是否处在「握手失败」状态。返回 "1" 表示需要自愈。
+         * dsh-pocket 的局域网会话 cookie（`HttpOnly`，值 = `sha256(PIN:sessionKey)`）。
+         *
+         * 它的真实寿命 = **dsh web 进程从启动到关闭**：`sessionKey` 是进程级随机数
+         * （dsh-pocket `lib/index.js:331-333`），Harness 一重启就换新，旧的必然失配。
+         * 失配本身不可怕，可怕的是 `maybeSeedAuthCookie`（`proxy.mjs:509-525`）看到
+         * 请求里**有任何** `dsh_pocket_token` 就 `return`，拒绝下发新的 —— 于是带着
+         * `?token=` 也停在「访问验证」页。见 [RecoveryPlanner] 顶部的实测对照。
+         */
+        const val POCKET_COOKIE = "dsh_pocket_token"
+
+        /**
+         * 探测页面处于什么状态。返回值经 [PageState.fromProbe] 翻译：
+         *  `'0'` 正常 / 握手过渡（不动手）、`'1'` 上游 401 握手损坏（清 dsh-auth-*）、
+         *  `'2'` dsh-pocket「访问验证」页（URL 带 token 时清 dsh_pocket_token）。
          *
          * 判据以**正文**为主，标题只做辅助 —— 这是实测逼出来的结论：
          * DSH 前端是 SPA，`document.title` 在页面切换后可能滞后或残留。真机调试时遇到过
@@ -782,7 +831,8 @@ class MainActivity : AppCompatActivity() {
          *  - 失败页：标题「DSH Pocket · 无法完成登录握手」，正文含「无法完成登录握手」
          *  - 上游 401：「dsh web authentication required」
          *  - 正常主界面：含「导出会话日志」/「探索未至之境」
-         *  - PIN 登录页：含「访问密码 | Access PIN」—— 此时清 cookie 无意义
+         *  - PIN 登录页：正文「此局域网地址受访问密码保护」/「访问密码 | Access PIN」，
+         *    标题「DSH Pocket · 访问验证」—— 残留坏 cookie 的典型症状，返回 '2'
          *  - 过渡页：标题「DSH Pocket · 正在进入」—— 握手进行中，不能当故障
          */
         const val HEAL_PROBE_JS = """
@@ -793,13 +843,16 @@ class MainActivity : AppCompatActivity() {
                 // 正常主界面：只要认出 DSH 主界面特征就不动手，标题再可疑也不算故障
                 if (b.indexOf('导出会话日志') !== -1) return '0';
                 if (b.indexOf('探索未至之境') !== -1) return '0';
-                // PIN 登录页 / 握手过渡页：都不是「cookie 失效」，清 cookie 没有意义
-                if (b.indexOf('访问密码') !== -1) return '0';
-                if (t.indexOf('访问验证') !== -1) return '0';
+                // 握手过渡页：正在进行，等它自己跳
                 if (t.indexOf('正在进入') !== -1) return '0';
                 // 真失败：以正文为准
                 if (b.indexOf('无法完成登录握手') !== -1) return '1';
                 if (b.indexOf('dsh web authentication required') !== -1) return '1';
+                // PIN 页：正文或标题任一命中即可判（这一页正文很短，渲染很快；
+                // 而标题「DSH Pocket · 访问验证」是它最稳定的特征）
+                if (b.indexOf('受访问密码保护') !== -1) return '2';
+                if (b.indexOf('访问密码') !== -1) return '2';
+                if (t.indexOf('访问验证') !== -1) return '2';
                 // 正文还没渲染出来时，才退回用标题判断失败页
                 if (b.length === 0 && t.indexOf('无法完成登录握手') !== -1) return '1';
                 return '0';

@@ -16,10 +16,12 @@
 | 5 | 启动自动连接 + 落在主界面 | ✅ | CDP 实测 `title=DeepSeek Harness` |
 | 6 | 移除顶部返回键 | ✅ | 交给系统返回键 |
 | 7 | 公网远程连接（隧道） | 🟡 阻塞已解，待真机 | 见下 |
-| 7a | 连接列表区分「局域网 / 公网 / 本机」落点 | ✅ | `tests=24 failures=0` |
+| 7a | 连接列表区分「局域网 / 公网 / 本机」落点 | ✅ | `tests=24 failures=0`（EndpointTest） |
+| 7b | 「访问验证」页自愈：清失效 `dsh_pocket_token` 后带 token 重连 | ✅ | 全量 `tests=59 failures=0` |
 | 8 | 手机软件开发知识库（5 篇种子文档入库 + 挂载） | ✅ | entries/documents/fts = 5/5/5 |
 
-**测试基线：`tests=24 failures=0 errors=0`**（`EndpointTest`，原 12 条 → 24 条）
+**测试基线：全量 `tests=59 failures=0 errors=0 skipped=0`**
+（`BackNavigationDeciderTest` 11 + `EndpointTest` 24 + `HandshakeHealGateTest` 10 + `RecoveryPlannerTest` 14）
 **APK：`app-debug.apk` 7,469,704 B（全量构建；增量构建会差约 40 KB，属 dex/资源打包顺序差异，不是回归）**（versionName 0.1.0，versionCode 1）
 
 ---
@@ -184,6 +186,106 @@ CDP 查出靠的是 `localStorage['dsh.sessions.current']`，与 URL 无关。
 
 ---
 
+## 第 7b 步：「访问验证」页自愈 ✅
+
+### 症状
+
+用户原话：「打开 App 又要我输 PIN，可地址里明明带着 token」。
+更糟的是 `HEAL_PROBE_JS` 老版本把「访问验证」页判成 `'0'`（正常），
+所以自愈机制**永远不会动手**，用户只能手动重输。
+
+### 根因（dsh-pocket 一侧，不是 App 的锅）
+
+`lib/proxy.mjs:509-525`：
+
+```js
+function maybeSeedAuthCookie(req, res, rawToken, sessionKey) {
+  if (parseCookies(req.headers.cookie)[TOKEN_COOKIE]) return;   // ← 就是这一行
+  ...
+}
+```
+
+只要请求里带着**一个哪怕早已失效的** `dsh_pocket_token`，代理就拒绝下发新的。
+而 `dsh_pocket_token` 的值是 `sha256(PIN:sessionKey)`，`sessionKey` 是 dsh web 的
+**进程级随机数**（`lib/index.js:331-333`，不落盘）—— Harness 每重启一次就换新，
+手机上那枚 cookie 必然失配。
+
+于是链路变成：
+
+```
+GET /?token=PIN → 200 「正在进入」（认证通过）
+  → GET /       → 带着坏 cookie → 认证失败 → 「DSH Pocket · 访问验证」
+```
+
+### 实测对照（用不同 `cf-connecting-ip` 换掉握手计数做隔离）
+
+| 场景 | 第一步 | 第二步 |
+|---|---|---|
+| 基线（无 cookie） | `200 seed=True` | `200 len=47868` `DeepSeek Harness` ✅ |
+| 故障（残留坏 cookie） | `200 seed=False` | `200 len=3969` `DSH Pocket · 访问验证` ❌ |
+| 修复（清 cookie 后） | `200 seed=True` | `200 len=47868` `DeepSeek Harness` ✅ |
+
+连续 5 轮「`?dsh-pocket-retry=1&token=PIN` → `GET /`」全部进主界面，不撞 503。
+
+### 改动
+
+新增 `RecoveryPlanner.kt`（纯 JVM，可单测），把「页面状态 → 该做什么」抽出来：
+
+| PageState | 触发条件 | RecoveryAction |
+|---|---|---|
+| `HEALTHY` | 探测返回 `'0'` | `NONE` |
+| `HANDSHAKE_BROKEN` | 返回 `'1'` | `CLEAR_UPSTREAM_COOKIE`（清 `dsh-auth-*`） |
+| `PIN_REQUIRED` | 返回 `'2'` | URL 带 `?token=` → `CLEAR_POCKET_COOKIE`；否则 `ASK_USER` |
+| `UNKNOWN` | 求值失败/空 | `NONE` |
+
+`HEAL_PROBE_JS` 增加返回 `'2'`：正文含「受访问密码保护」或「访问密码」、
+标题含「访问验证」。（老版本这些分支都 return `'0'`，这就是修不好的直接原因。）
+
+`MainActivity`：
+- `healHandshakeIfNeeded()` 改为按 `RecoveryPlanner.plan()` 分派，不再只看 `'1'`。
+- 新增 `clearPocketCookie()`：只删 `dsh_pocket_token`，保留 `dsh-auth-*`。
+- 删除 `appendRetryParam()`，统一委托 `RecoveryPlanner.withRetry()`
+  （老版本没处理 `#`，`?dsh-pocket-retry=1` 会拼进 fragment，服务端收不到）。
+
+### 两条铁律（都写进了注释与单测）
+
+1. **只有 URL 里确实还带 `?token=` 时才允许清 `dsh_pocket_token`。**
+   没有 token 就清，用户被永久锁在「访问验证」页外 —— 那个页面没有密码可填。
+   → `plan_pinPageWithoutTokenAsksUser` / `plan_pinPageWithEmptyTokenAsksUser`
+2. **`dsh-pocket-retry=1` 必须插在 `#` 之前**，否则落进 fragment 服务端收不到，
+   握手计数清不掉，重连撞 503「无法完成登录握手」。
+   → `withRetry_insertsBeforeFragment`
+
+### 验证
+
+- `:app:assembleDebug` 通过；`--rerun-tasks` 全量 **tests=59 failures=0 errors=0 skipped=0**。
+  其中 `RecoveryPlannerTest` 14 条（`fromProbe` 2、`plan` 6、`hasPinToken` 2、`withRetry` 4）。
+- 编译期仍只有 3 条既有 deprecation 警告（`ScanActivity.kt:108/113`、`WebViewFactory.kt:33`），与本次无关。
+- **真机验证未做**：`adb` 无线调试配对成功（`guid=adb-ZY22GHMK5F-xFoQoe`）但连接一直 `offline`，见下节。
+
+---
+
+## 第 7c 步：真机无线调试接入（未完成）
+
+用户在手机开了无线调试。排查过程：
+
+1. `adb devices` 空、`adb mdns services` 空 —— Windows 上 adb 的 mDNS 发现不可靠
+   （UDP 5353 被 `svchost` pid 3164 与 adb 自己 pid 7468 同时占）。
+2. 从 ARP + mDNS 应答定位到手机是 **`192.168.50.138`**（MAC `6A-51-C1-17-9F-2D`），
+   实例名 `adb-ZY22GHMK5F-xFoQoe`。
+3. 全端口扫描 1-65535（并发 2500、超时 200ms、约 200s）→ **唯一开放端口 `51688`**，
+   无明文首包（符合 TLS）。
+4. `adb pair 192.168.50.138:37659 120264` → **`Successfully paired`**。
+5. 但 `adb connect 192.168.50.138:51688` **一直是 `offline`**；
+   `kill-server` / `reconnect offline` / 重扫端口都无效，手机侧始终只有 51688 一个端口。
+
+**卡点判断**：配对成功（信任关系已建立），但连接端口协商不成功。
+51688 在配对前后的全端口扫描里都稳定开放，说明它不是配对时随机分配的临时端口。
+下一步需要用户在手机「无线调试」页面直接读出 `IP:端口`（那才是当前 connect 端口，
+与配对端口不同），或改用 USB 线接入。
+
+---
+
 ## 第 8 步：手机软件开发知识库 ✅
 
 用户说「建立手机软件开发的知识库」，之后要「把五篇种子文档真正入库」。
@@ -226,13 +328,12 @@ CDP 查出靠的是 `localStorage['dsh.sessions.current']`，与 URL 无关。
 
 ## 下一步
 
-第 7 步的**技术阻塞已解除**（见上），当前只差两件外部输入：
-
-1. 在 dsh-pocket 设置页点「开启公网访问」拿到公网 URL + PIN；
-2. 插上真机（`8PCE7LJB99VG7TRO`），关 WiFi 走 4G 验证公网入口能进 DSH 主界面。
-
-拿到之后的工作：把公网端点存成第二条连接、验证列表里「局域网 / 公网」两条并存时
-点击行为正确、把 `HandshakeHealGate` 在公网首次握手时的表现量一遍。
+1. **真机验证第 7b 步自愈**：需要有效的 adb 连接（USB 线，或从手机「无线调试」页读出当前 `IP:端口`）。
+   验证手法：进 App 后手动把 `dsh_pocket_token` 改成垃圾值，看是否自动恢复进主界面。
+2. **第 7 步公网远程连接**：技术阻塞已解除，只差在 dsh-pocket 设置页点「开启公网访问」
+   拿到公网 URL + PIN，然后关 WiFi 走 4G 验证。
+3. 拿到公网端点后：把它存成第二条连接、验证列表里「局域网 / 公网」两条并存时点击行为正确、
+   把 `HandshakeHealGate` 在公网首次握手时的表现量一遍。
 
 命名隧道（固定域名）是第 7 步的可选项，需要 Cloudflare 账号 + 自有域名 + Tunnel Token，
 走 `tunnel.setConfig`；它解决的是「地址每次重开都变」这个体验问题，不是可用性问题。

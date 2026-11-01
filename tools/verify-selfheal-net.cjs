@@ -70,8 +70,14 @@ class WS {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 端口可配：局域网真机转发常用 9222，公网真机用 9223（同一台机器上可能同时开着两条转发）。
+// 用法：node verify-selfheal-net.cjs [cdpPort]
+// cookie 的 domain 不再写死 192.168.50.58，改成从当前页面 origin 现取，
+// 否则换成公网域名（*.trycloudflare.com）时 setCookie 会因 domain 不匹配而失败。
+const CDP_PORT = process.argv[2] || '9222';
+
 (async () => {
-  const list = JSON.parse(await get('http://127.0.0.1:9222/json'));
+  const list = JSON.parse(await get('http://127.0.0.1:' + CDP_PORT + '/json'));
   const t = list.find((x) => x.type === 'page');
   if (!t) { console.error('没有 page target'); process.exit(1); }
   const origin = new URL(t.url).origin;
@@ -98,7 +104,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   await ws.cmd(i++, 'Network.setCookie', {
     name: 'dsh_pocket_token',
     value: 'deadbeef'.repeat(8),
-    domain: '192.168.50.58',
+    domain: new URL(origin).hostname,
     path: '/',
     httpOnly: true,
     expires: Math.floor(Date.now() / 1000) + 30 * 24 * 3600,

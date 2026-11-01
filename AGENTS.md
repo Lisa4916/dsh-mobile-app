@@ -2,9 +2,10 @@
 
 > 工程根：`D:\dsh-mobile-app` ｜ 包名 `com.dsh.remote` ｜ 版本 0.1.0
 > 上游依赖（外部、不属于本仓库）：`dsh-pocket` 2.12.0 反向代理 :3081，以及它背后的 `dsh web` :54282
-> 状态：**A 档主体已真机跑通**，进入功能扩展期。当前唯一阻塞项是「公网远程连接」。
-> 「访问验证页自愈」已实现（第 7b 步）并**在真机上抓到决定性证据**（第 7d 步）：
+> 状态：**A 档主体已真机跑通**，公网远程连接（第 7 步）已在真机 4G 下打通（第 7e 步）。
+> 「访问验证页自愈」已实现（第 7b 步）并**在真机上抓到决定性证据**（第 7d 步，公网域名下同样复验过）：
 > 坏 cookie → 判 `'2'` → 清 `dsh_pocket_token` → 带 `retry+token` 重连 → 进主界面。
+> 反向分支（地址里没有 `?token=`）也实测过：**只提示、不清 cookie**，否则用户被永久锁在验证页外。
 
 ---
 
@@ -81,11 +82,12 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 | 4 | 键盘避让（WebView 不缩 + 页面 rAF 自驱） | ✅ 见 §5 |
 | 5 | 启动即自动连接，落在 DSH 主界面（document-start 清 `dsh.sessions.current`） | ✅ |
 | 6 | 移除顶部返回键（压住了 DSH 自己的侧边栏按钮） | ✅ |
-| **7** | **公网远程连接（隧道）** | 🟡 技术阻塞已解除，待真机 + 公网 URL |
+| **7** | **公网远程连接（隧道）** | ✅ 真机 4G 通过（第 7e 步） |
 | 7a | 连接列表区分「局域网 / 公网 / 本机」落点 | ✅ |
 | 7b | 「访问验证」页自愈 | ✅ 见 §6.13 |
 | 7c | 真机无线调试接入 | ❌ 放弃（配对成功但恒 offline，改走 USB） |
 | 7d | 真机 USB 接入 + 第 7b 步真机复验 | ✅ |
+| 7e | 公网隧道开启 + 真机 4G 验证 + ASK_USER 分支实测 | ✅ |
 | 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness` | ✅ 见 §10 |
 | 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
 | 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
@@ -96,9 +98,13 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 cloudflared precheck 全 PASS，quick tunnel 注册成功（`lax11`）且公网返回 200 ——
 「sing-tun 掐断边缘连接（error 1033）」这条旧结论**已经不成立**，不要再照着它关 TUN 或换 cpolar。
 
-剩余阻塞是外部输入，不是技术：① 在 dsh-pocket 设置页点「开启公网访问」拿 URL + PIN。
+第 7 步（公网远程连接）**已打通**（第 7e 步）：dsh-pocket 设置页开启 quick tunnel 拿到
+`https://<random>.trycloudflare.com` + 公网 PIN，真机关 WiFi 走 4G 直接进主界面；
+公网域名下「访问验证页自愈」与「无 token 时不乱清 cookie」两支都实测过。
+
+**quick tunnel 地址每次重开都变**：`~/.dsh/dsh-pocket/tunnel-auto.json` 只记 `{"at":<ts>}`、不记 URL，
+目录里也没有任何文件含 `trycloudflare` 字符串 —— 隧道重开后必须回设置页重新读地址与 PIN。
 （端点参考：`tunnel.start` / `tunnel.stop` / `tunnel.setConfig`；`tunnel.start` 必须带 `payload.disclaimer=true`，服务端强制校验。）
-（真机已接入：`adb devices` 现在有 `ZY22GHMK5F`，走 USB。）
 
 ---
 
@@ -269,10 +275,30 @@ CSS px × `(1080 / window.innerWidth)` = ×2.748。用 CSS 值直接点会全部
 旧记录里的 `8PCE7LJB99VG7TRO`（Redmi Note 12T Pro / Android 15）不是主用机。
 `POLYFILL_JS` 之所以存在，正是因为这台机器 WebView 只有 117（缺 `Promise.withResolvers`）。
 
+**但公网 4G 那次是 Redmi `8PCE7LJB99VG7TRO` 一次通过的**：同场景下 XT2335-3 页面黑屏后从 adb 掉线。
+两台机器都可以用，量真机行为时**先说清用的是哪台**，别把一台的结论搬到另一台。
+
 ### 6.16 无线调试（`adb pair`）在这台 Windows 上走不通
 配对能成功拿 `guid`，但 `adb connect` 恒 `offline`；全端口扫描只有 `51688` 一个口开放且
 配对前后一致（不像临时端口）；mDNS 发现也因为 UDP 5353 被 `svchost` 与 adb 自己抢而不可靠。
 **用 USB。** 别在这条路上继续投时间。
+
+### 6.17 公网隧道：地址不落盘，重开必变
+`~/.dsh/dsh-pocket/tunnel-auto.json` 只有 `{"at":<ts>}`，**不记 URL**；整个 `~/.dsh/dsh-pocket/`
+目录下没有任何文件含 `trycloudflare` 字符串。所以：
+- 隧道重开后地址一定变，必须回设置页重新读 URL + PIN；
+- 想自动化就别指望读配置文件，走 `pocket.status` / `tunnel.start` RPC。
+- 设置页首次点「开启公网访问」可能失败并留 `❌ 开启失败：隧道进程退出（code=4294967295）`
+  （`code` 是 -1，进程被杀的通用码，`dsh-pocket/lib/service.mjs:347`）。
+  **复位办法**：点 `关闭公网` 让按钮回到「开启公网访问」，再点一次。
+
+### 6.18 断网恢复后，第一次点连接会「网页无法打开」
+飞行模式下启动会正确报 `net::ERR_INTERNET_DISCONNECTED` 并退回列表（不黑屏，这是对的）。
+但恢复网络后点同一行，**前两次都是「网页无法打开」，`am force-stop` 重启后才进得去**。
+已排除网络自身：同时刻手机侧 `ping 1.1.1.1`、`TCP 443`、带正确 `Host` 头的请求全通，恢复后还多等了 20 秒。
+可疑点是 WebView 沙箱进程在飞行模式期间被系统清掉
+（`ProcessSceneCleaner: SwipeUpClean: kill procName=...webview...sandboxed_process0`）后重建。
+**结论未定，别当成网络问题去查。**
 
 ---
 
@@ -292,7 +318,8 @@ CSS px × `(1080 / window.innerWidth)` = ×2.748。用 CSS 值直接点会全部
 | `sample-viewport.cjs` | 页面内 rAF 采样 innerH / composerTop 变化点 |
 | `simulate-stale-cookie.cjs` | `dump` 列 cookie（httpOnly/domain）；`stale` 把 `dsh_pocket_token` 写成 `deadbeef`×8 造故障 |
 | `verify-selfheal.cjs` | 同一进程内「弄脏 → 导航 → 逐秒采样页面」，给 ✅/❌ |
-| `verify-selfheal-net.cjs` | **判定力最强**：抓 `Network.requestWillBeSent`，识别同时带 `dsh-pocket-retry` 与 `token=` 的那一跳（§6.13） |
+| `verify-selfheal-net.cjs` | **判定力最强**：抓 `Network.requestWillBeSent`，识别同时带 `dsh-pocket-retry` 与 `token=` 的那一跳（§6.13）。支持 `<cdpPort>` 参数；cookie domain 从页面 origin 现取，公网域名可用 |
+| `verify-ask-user.cjs` | 反面分支：无 `?token=` 时自愈**必须不动手**（不清 cookie、不重导航、停在验证页） |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 

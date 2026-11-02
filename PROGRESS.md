@@ -25,6 +25,7 @@
 | 9 | 工程加固：截图出库 / PIN 去硬编码 / CI / 集成契约 / 文档纠错 | ✅ | 全量 `tests=69 failures=0`；`git ls-files` 无调试截图 |
 | 10 | 拆 `MainActivity`：抽 `RecoveryExecutor` / `CookieNames` / `ConnectionRepository` | ✅ | 全量 `tests=118 failures=0`；真机自愈 3 跳仍成立 |
 | 11 | 补 `androidTest`：`PageProbe` 判据拆成纯函数 + 真 WebView 取值验证 | ✅ | 真机 `OK (7 tests)`；`tests=118` |
+| 12 | 滑动返回不再闪侧栏（直接点屏外按钮，不展开侧栏） | ✅ | 真机 4 轮 `sideL` 全程 `-217` 不动；`tests=118`；lint 0/27 |
 
 **测试基线：JVM 单测全量 `tests=118 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
@@ -685,6 +686,60 @@ OK (7 tests)
   ```
 
 ---
+
+## 第 12 步：滑动返回不再闪侧栏 ✅
+
+用户报「滑动返回时界面存在问题」。CDP 连拍抓到现场：侧栏整条滑出再收回，用户看到的就是
+一条黑边横扫屏幕。
+
+### 根因
+
+`WebViewFactory.DSH_GO_HOME_JS` 的旧实现为了点 `.wtg9ga_newSession`，先去点顶部开关
+**把侧栏展开**、等按钮进屏幕、再点它。展开这一步纯属多余。
+
+### 推翻一条旧结论
+
+旧注释写「收起态 `.wtg9ga_newSession` 在屏幕外（`left = -207`），所以 `click()` 无效」——**错的**。
+直接 `ns.click()` 就能回首页，因为 DOM 的 `click()` 派发合成事件、**不经过命中测试**，
+元素在屏幕外照样收到。当时是用坐标点击验证的，屏外坐标本来就点不到，
+把「坐标点不到」误当成「click 无效」。
+
+### 改动
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| 路径 | 展开侧栏 → 等 → 点 | **直接点屏外按钮**，失败才走旧路径兜底 |
+| `DIRECT_MS` | 900 | **2400**（实测用到 1996ms，留 900 会误判成失败转兜底，等于白改） |
+| `reachedHome()` 判据 | 首页特征在前 | **先 `tabs = 对话 && 轨迹` 判会话页**，为真直接 false |
+| 轮询间隔 | 60ms | 40ms |
+
+第 3 条踩过一次坑：首版把首页判据放前面，会话页 DOM 里同时留着「探索未至之境」（idx 9633）
+与「描述你想要构建的内容」（idx 9661），被判成首页 → 函数直接 return → **返回键完全没反应**。
+
+### 验证（真机 Redmi `8PCE7LJB99VG7TRO` / Android 15）
+
+手势滑动返回连测 4 轮，`record-back.cjs` 连拍显示：
+
+```
+[ 1] sideL=-217 side=wtg9ga_collapsed … tabs=true  going=true
+[ 5] sideL=-217 side=wtg9ga_collapsed … tabs=false going=false   ← 0.4 秒到首页
+Document 请求: 无（页面未重载）
+```
+
+**`sideL` 全程 `-217` 未动**，侧栏没有滑出。修复前同一工具抓到的是
+`-308 → 0 → -216`（滑出再收回）。截图对比：`build-artifacts/back-frames/frame-001.jpg`
+（修复前，侧栏覆盖左半屏）vs `frame-005.jpg`（修复后，干净的首页）。
+
+首页再按返回仍正常退出到桌面（`topResumedActivity` 变成 `com.miui.home/.launcher.Launcher`）。
+
+### 回归
+
+`gradle :app:assembleDebug :app:testDebugUnitTest :app:lintDebug --rerun-tasks` →
+BUILD SUCCESSFUL in 1m 26s，`tests=118 failures=0 errors=0`，lint `0 error / 27 warning`，
+APK 7,485,956 B。
+
+---
+
 ## 下一步
 
 1. ~~真机验证第 7b 步自愈~~ ✅ 已完成（第 7d 步，CDP 抓到 `retry+token` 重连）。

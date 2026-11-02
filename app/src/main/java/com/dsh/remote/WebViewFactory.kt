@@ -414,13 +414,33 @@ object WebViewFactory {
      *  - 派发 Escape 键：无变化
      *  - **点侧栏「新会话」按钮 `wtg9ga_newSession`：切到 home 且标记仍在 → 真·轻量切换**
      *
-     * 所以这里走 UI 路径。两个必须处理的细节：
-     *  1. 侧栏收起时，`wtg9ga_newSession` 的 left 是 **-199**（被 CSS 移出屏幕），click 无效。
-     *     必须先点顶部的侧栏开关（收起态下它在屏幕内的副本是无类名 button，y<60）。
-     *  2. 侧栏展开是**动画**，newSession 的 left 从 -199 变到 14 需要时间。所以用轮询等待，
-     *     不能点完就立刻点下一个。
+     * ## 为什么不能先展开侧栏（2026-11 修正，用户实测反馈「滑动返回时闪屏、侧边栏闪动」）
      *
-     * 整个流程约 1–2 秒，比 reload 快，且不闪白、不重放插件加载。
+     * 旧实现是「先点顶部开关把侧栏滑出来 → 轮询等 `newSession` 进入屏幕 → 再点它」。
+     * 功能上确实回到了 home，但**视觉上整个侧栏要从左边滑出再滑回**，用户看到的就是
+     * 一条黑边横扫屏幕。CDP 连拍抓到的现场（`tools/record-back.cjs`）：
+     * ```
+     * [1] sideL=-308 side=wtg9ga_fading going=true      ← 侧栏开始滑出
+     * [2] sideL=   0 side=wtg9ga_fading                 ← 侧栏完全展开
+     * [3] sideL=-216 side=wtg9ga_collapsed              ← 收回
+     * [7] … hero=true                                   ← 这时才回 home
+     * ```
+     * 也就是说「展开侧栏」这个中间步骤纯属多余动作。
+     *
+     * **修正后：收起态下直接 `.click()` 屏外的 `newSession` 按钮就能回 home。**
+     * 实测（`tools/eval-page.cjs`，3 轮全通过）：`sideL` 全程稳定在 -217 不动，
+     * window 标记存活（页面未重载），hero 出现。原因很朴素 —— DOM 的 `click()`
+     * 派发的是合成事件，**不经过命中测试**，元素在屏幕外照样收到 click；
+     * 之前那条「left 是负数所以 click 无效」的结论是错的（当时用坐标点击验的，
+     * 屏外坐标本来就点不到，把「坐标点不到」误当成「click 无效」）。
+     *
+     * ## 保留的兜底
+     * 万一将来版本改成「屏外按钮忽略合成 click」，`home()` 会校验结果（`reachedHome()`），
+     * 没成功才退回「展开侧栏」的旧路径。这样既保证视觉干净，又不会在某次升级后
+     * 变成一个按了没反应的返回键。
+     *
+     * 用 `setTimeout` 而不是 `requestAnimationFrame`：rAF 在页面不可见 / 窗口过渡动画
+     * 期间会被完全暂停，而「按下返回」那一刻恰好就是这种状态，用 rAF 会让整个流程卡死。
      */
     const val DSH_GO_HOME_JS = """
         (function(){
@@ -428,7 +448,34 @@ object WebViewFactory {
           window.__dshGoingHome = true;
 
           var started = Date.now();
-          var TIMEOUT_MS = 2600;
+          // 直接点屏外按钮到页面切完，真机实测要 **约 2.0 秒**（DSH 内部有过渡动画，
+          // 1996ms / 54 次 25ms 轮询）。这个值必须留足余量，否则会误判成「点了没反应」
+          // 而走上兜底路径 —— 那就又把侧栏滑出来了，等于白改。
+          var DIRECT_MS = 2400;
+          var FALLBACK_MS = 2600; // 兜底路径（展开侧栏）的总时限
+
+          function body(){
+            return (document.body ? document.body.innerText : '') || '';
+          }
+
+          function reachedHome(){
+            var b = body();
+            // 顺序不能反：会话页的 DOM 里**同时**留着「探索未至之境」与
+            // 「描述你想要构建的内容」（新会话面板没被卸载），所以必须先排除会话页。
+            // 这条实测踩过：先查 hero 会把会话页误判成已经在 home，
+            // 于是整个函数直接 return，返回键变得完全没反应。
+            var tabs = b.indexOf('对话') !== -1 && b.indexOf('轨迹') !== -1;
+            if (tabs) return false;
+            if (b.indexOf('探索未至之境') !== -1) return true;
+            if (b.indexOf('描述你想要构建的内容') !== -1) return true;
+            if (b.indexOf('发消息或创建任务') !== -1) return true;
+            if (b.indexOf('选择一个工作区开始') !== -1) return true;
+            return false;
+          }
+
+          function newSession(){
+            return document.querySelector('.wtg9ga_newSession');
+          }
 
           function isVisible(el){
             if (!el) return false;
@@ -436,8 +483,10 @@ object WebViewFactory {
             return r.width > 0 && r.height > 0 && r.left >= 0 && r.left < window.innerWidth;
           }
 
-          // 收起态下，侧栏开关的屏幕内副本是「顶部、无类名」的 button
+          // 收起态下，侧栏开关可能是「顶部、无类名」的 button，也可能带 aria-label
           function findHeaderToggle(){
+            var byAria = document.querySelector('[aria-label="打开侧边栏"]');
+            if (byAria) return byAria;
             var btns = document.querySelectorAll('button');
             for (var i = 0; i < btns.length; i++) {
               var b = btns[i];
@@ -452,31 +501,34 @@ object WebViewFactory {
             return null;
           }
 
-          function newSessionButton(){
-            var b = document.querySelector('.wtg9ga_newSession');
-            return isVisible(b) ? b : null;
+          // 阶段一：直接点（不展开侧栏，视觉上零动画）
+          function direct(){
+            var ns = newSession();
+            if (ns) ns.click();
+            var t0 = Date.now();
+            (function check(){
+              if (reachedHome()) { window.__dshGoingHome = false; return; }
+              if (Date.now() - t0 > DIRECT_MS) { fallback(); return; }
+              setTimeout(check, 40);
+            })();
           }
 
-          // 用 setTimeout 而不是 requestAnimationFrame：rAF 在页面不可见 / 窗口过渡动画
-          // 期间会被完全暂停，而「按下返回」那一刻恰好就是这种状态，用 rAF 会让整个流程卡死。
-          function tick(){
-            if (Date.now() - started > TIMEOUT_MS) {
-              window.__dshGoingHome = false;
-              return;
-            }
-            var ns = newSessionButton();
-            if (ns) {
-              // 侧栏已展开 → 点「新会话」切回开始界面（真机实测：页面不重载）
-              ns.click();
-              window.__dshGoingHome = false;
-              return;
-            }
-            var tog = findHeaderToggle();
-            if (tog) tog.click();
-            setTimeout(tick, 120);
+          // 阶段二（兜底）：展开侧栏再点。会有侧栏滑动的视觉，但至少功能可用。
+          function fallback(){
+            var t0 = Date.now();
+            (function tick(){
+              if (reachedHome()) { window.__dshGoingHome = false; return; }
+              if (Date.now() - t0 > FALLBACK_MS) { window.__dshGoingHome = false; return; }
+              var ns = newSession();
+              if (isVisible(ns)) { ns.click(); }
+              else { var tog = findHeaderToggle(); if (tog) tog.click(); }
+              setTimeout(tick, 120);
+            })();
           }
 
-          tick();
+          // 已经在 home 就别动 —— 免得平白闪一下侧栏
+          if (reachedHome()) { window.__dshGoingHome = false; return; }
+          direct();
         })();
     """
 

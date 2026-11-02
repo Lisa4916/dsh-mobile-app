@@ -157,6 +157,7 @@ App 的处理（`RecoveryPlanner` + `HandshakeHealGate`）：
 5. **MIUI 会拒绝 `input tap` 的触摸注入。** logcat 是 `InputManager: Input event injection from pid N failed`。这时 `input tap` 静默无效、页面毫无反应，**极易被误判成 App 的 bug**（本项目就为此追查了一个不存在的「断网重连失败」缺陷）。可靠做法是 `monkey -f` 注入 `DispatchPointer`，判据看 `Events injected` 非 0。
 6. **`adb exec-out screencap -p >` 会 CRLF 毁 PNG**，必须 `adb shell screencap -p /sdcard/x.png` + `adb pull`。
 7. **PowerShell 里 `$pid` 是只读自动变量**，脚本里改名 `$appPid`。
+8. **返回首页不能展开侧栏。** 收起态下 `.wtg9ga_newSession` 在屏幕外（`left = -207`），但 DOM 的 `click()` **不经过命中测试**，直接点就能回首页。旧实现为了点它先把侧栏展开，用户看到的就是一条黑边横扫屏幕（侧栏滑出再收回）。另外从点击到页面切完实测要**约 2000ms**，等待上限留短了会误判失败、退回那条展开侧栏的老路，等于白改。详见 `AGENTS.md` §6.20。
 
 ## 构建
 
@@ -215,6 +216,10 @@ $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
 | `test-page-drive.cjs` | 对照实验：页面 rAF 自驱能否逐帧 |
 | `probe-bg.cjs` / `probe-composer.cjs` | 探页面背景色 / composer 祖先链的 transition 与 flex 属性 |
 | `tap-composer.cjs` | 取 composer CSS 坐标 + adb tap，含密度换算（CSS px × 1080/innerWidth） |
+| `eval-page.cjs` | 调页面最短路径：`node eval-page.cjs <cdpPort> "<js>"` 或 `--file`，调 DOM 逻辑首选 |
+| `probe-sessions.cjs` | 打开侧栏并列出会话条目，用于「进会话→按返回」的重放 |
+| `probe-sidebar.cjs` | 列出按钮几何与 `aria-label`，页面改版后重新定位选择器 |
+| `record-back.cjs` | 触发返回 + CDP 连拍 + DOM 采样，抓 1 秒内中间态；**验证返回动效是否闪屏就看它** |
 
 `_` 前缀的是早期一次性探针（`_probe-cur.cjs`、`_probe-page.cjs`、`_probe-storage.cjs`、`_tabs.cjs`、`_test-reset.cjs`），留作参考，不进主流程。
 
@@ -222,8 +227,8 @@ CDP 转发要点：`cat /proc/net/unix | grep webview_devtools_remote` 会返回
 
 ## 待办（下一档 B）
 
-- 补 `androidTest`：WebView 同域判定、cookie 清除→重导航、键盘 insets、扫码链路目前只有手跑脚本
-- 拆 `MainActivity`（911 行）：抽 `RecoveryExecutor` / `ConnectionRepository`
+- `androidTest` 覆盖仍不全：WebView 同域判定、cookie 清除→重导航、键盘 insets、扫码链路只有手跑脚本
+- `MainActivity` 仍有 864 行：`buildUi()` 约 128 行代码造 UI（无 layout XML），可拆 `HomeView` / `WebPanel`
 - 隧道地址自动读回（quick tunnel 每次变，现在要手动重扫；走 dsh-pocket 的 `pocket.status` RPC）
 - 前台服务保活（现在靠 `svc power stayon true`，不该长期开）
 - 任务完成通知（DSH 的 SSE 完成事件）

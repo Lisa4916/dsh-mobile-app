@@ -399,6 +399,29 @@ node .\tools\tap.cjs 540 613 8PCE7LJB99VG7TRO   # 坐标 + 序列号
 
 坐标用 `uiautomator dump` 拿 `bounds` 再取中心，别按逻辑像素硬猜（§6.10）。
 
+### 6.20 返回首页**不能展开侧栏**——屏外元素 `click()` 照样生效
+
+`WebViewFactory.DSH_GO_HOME_JS` 的旧实现是「点顶部开关展开侧栏 → 等 `.wtg9ga_newSession`
+进屏幕 → 再点它」。中间那一步纯属多余，用户在滑动返回时会看到**一条黑边横扫屏幕**
+（侧栏滑出再收回），这就是「闪屏 / 侧边栏闪动」的真身。
+
+**关键事实（真机实测，推翻旧注释）**：收起态下 `.wtg9ga_newSession` 的 `left = -207`（屏幕外），
+但直接 `ns.click()` 就能回首页。原因：DOM 的 `click()` 派发合成事件，**不经过命中测试**。
+旧注释里「left 是负数所以 click 无效」是错的——当时用坐标点击验证，屏外坐标本来就点不到，
+把「坐标点不到」误当成「click 无效」。
+
+三条硬约束：
+1. **`DIRECT_MS` 必须 ≥ 2400**。真机实测从点击到页面切完要**约 1996ms**（54 次 25ms 轮询），
+   留 900ms 会误判「点了没反应」而走上兜底（= 把侧栏滑出来），等于白改。
+2. **`reachedHome()` 必须先判会话页再判首页**。会话页 DOM 里同时留着「探索未至之境」
+   （idx 9633）与「描述你想要构建的内容」（idx 9661），先判首页会把会话页误认成首页 →
+   函数直接 return → **返回键完全没反应**。正确顺序是先 `tabs = 对话 && 轨迹`，`tabs` 为真直接 false。
+3. 兜底路径（展开侧栏）保留但只在前两条都不成立时才走，`FALLBACK_MS = 2600` 封顶。
+
+验证方式：`node tools/record-back.cjs 9240 16 80` 连拍，看 `sideL` 是否全程 `-217` 不动；
+只要中途出现 `sideL=0` 就说明还在走展开侧栏那条路。截图见
+`build-artifacts/back-frames/frame-005.jpg`（干净的首页）与 `frame-001/002.jpg`（修复前的闪屏）。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）
@@ -422,6 +445,11 @@ node .\tools\tap.cjs 540 613 8PCE7LJB99VG7TRO   # 坐标 + 序列号
 | `probe-netstack.cjs` | 探 WebView 当前 title/url/readyState/body；带 `--navigate <url>` 时先导航再观察 15 秒并统计 Document 请求/响应/失败 |
 | `watch-net.cjs` | 持续监听 CDP 网络事件（`<cdpPort> <秒数>`），末尾给「Document 请求总数」，为 0 时标注「loadUrl 被短路」。判断「点击到底有没有发出导航」用它 |
 | `tap.cjs` | 真机可靠点击：`node tap.cjs <x> <y> [serial]`，走 `monkey -f` 绕开 MIUI 对 `input tap` 的注入拒绝（§6.19） |
+| `eval-page.cjs` | **调页面最短路径**：`node eval-page.cjs <cdpPort> "<js>"` 或 `--file <path>`。比 `adb input` 可靠（MIUI 拒注入），调 DOM 逻辑首选 |
+| `probe-sessions.cjs` | `node probe-sessions.cjs <cdpPort> [open]`，打开侧栏并列出 `.wnFoaW_sessionRow` 会话条目，用于「进会话→按返回」的重放 |
+| `probe-sidebar.cjs` | 列出所有按钮几何、`aria-label`、侧栏容器位置。页面版本变化后靠它重新定位选择器 |
+| `probe-back-nav.cjs` | `node probe-back-nav.cjs <cdpPort> [--state\|--back]`，打印页面位置/侧栏几何，`--back` 触发返回并逐帧采样 + 抓 Document 事件 |
+| `record-back.cjs` | `node record-back.cjs <cdpPort> [帧数] [间隔ms] [目录]`，触发返回 + CDP 连拍 + DOM 采样，能抓到 1 秒内的中间态。**验证返回动效是否闪屏就看它**（§6.20） |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 

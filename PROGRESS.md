@@ -36,7 +36,7 @@
 | 20 | 第二台手机装机与收更新：版本号单一来源 + 局域网分发页 | ✅ | 手机侧 curl 下载 1,930,818 B，SHA-256 与清单一致；`adb install -r Success |
 | 21 | GitHub Release 发版：专用签名密钥 + tag 触发构建 | ✅ | Release `v0.2.0` 已发布；`releases/latest/download/dsh-remote-latest.apk` 实测 302→200、1,930,818 B，SHA-256 与 `SHA256SUMS.txt` 一致 |
 | 22 | 装完就能连：自动扫局域网找电脑，扫到只差 PIN | ✅ | 254 地址并发扫完 1.86 s 命中本机；真机 `lan discovery done, found=1` 已复现；单测 142 → 176 |
-| 23 | 免 PIN 直进主界面：扫描时识别「这台电脑不需要 PIN」 | ✅ | 全新安装清数据后冷启动 522ms 直接落主界面，无 PIN 屏；单测 176 → 189；lint 0 error / 22 warning |
+| 23 | 免 PIN 直进主界面：扫描时识别「这台电脑不需要 PIN」 | ✅ | 清数据冷启动 313ms 直接落主界面，无 PIN 屏；单测 176 → 189；Release `v0.4.0` 已发布，固定地址实测 1,930,950 B |
 
 **测试基线：JVM 单测全量 `tests=189 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
@@ -1945,3 +1945,40 @@ mCurrentFocus=Window{... com.dsh.remote/com.dsh.remote.MainActivity}
 - 多台电脑都免 PIN 时不猜，仍然落到 `AskPin`。
 - 回归：`tests=189 failures=0 errors=0`（12 个测试类）；lint `0 error / 22 warning`；
   `app-release.apk` **1,930,946 B**。
+
+### 23.7 发版落地（v0.4.0，2026-11-03）
+
+`github.com:443` 的 git 传输这一轮又断了（`Recv failure: Connection was reset`，
+且 `127.0.0.1:7890` 上没有进程在听），而 `https://api.github.com` 完全正常 —— 于是走 Git Data API：
+
+```
+POST /git/blobs（逐文件 base64）→ POST /git/trees（base_tree）
+→ POST /git/commits → PATCH /git/refs/heads/master → POST /git/tags + POST /git/refs
+```
+
+**踩过的两个坑：**
+
+1. 脚本后缀是 `.mjs` 时不能写 `require`，报
+   `ReferenceError: require is not defined in ES module scope`；必须
+   `import { execFileSync } from 'node:child_process'`。
+2. 从 `version.properties` 取版本号的正则**必须锚行首**
+   `/^versionName=([\d.]+)\s*$/m` —— 注释里也有一句 `-Pdsh.versionName=0.2.1`，
+   不锚定会把 tag 打成 `v0.2.1`（第一次就踩了，已 `DELETE /git/refs/tags/v0.2.1` 删掉）。
+
+**结果：**
+
+| 项 | 值 |
+|---|---|
+| 本地提交 | `6540f6e` feat(remote): 电脑侧免 PIN 时扫到就直进主界面，不再出现 PIN 屏 |
+| 远端 master | `f9a5f59` |
+| tag | `v0.4.0` |
+| Release 工作流 | run `41475557955` completed / **success** |
+| 资产 | `dsh-remote-0.4.0-4.apk` **1,930,950 B**、`dsh-remote-latest.apk` 1,930,950 B、`SHA256SUMS.txt` 185 B |
+| 固定地址 | `https://github.com/Lisa4916/dsh-mobile-app/releases/latest/download/dsh-remote-latest.apk` → 200 / 1,930,950 B |
+| SHA-256 | `8d791d29ac331193929e7b0a1df060ccb1c73a12e7c210aa9b29afbad2b68abd` |
+
+还有一个**不是代码问题**的坑一起记下：更新后「远程连接不上」的真因是电脑侧
+`Get-NetConnectionProfile` 把 WLAN 判成 `Public`，Windows 默认 Public 入站全挡，
+手机 `ping 192.168.50.58` 100% 丢包。改成 `Set-NetConnectionProfile -InterfaceAlias "WLAN" -NetworkCategory Private`
+（需管理员）后立刻 `0% packet loss`、`nc -z 192.168.50.58 3081` 通。
+`Get-NetFirewallRule -DisplayName 'DSH Pocket*'` 至今为空 —— 通的是 Private 的默认放行，不是我们加的规则。

@@ -687,11 +687,16 @@ https://github.com/<owner>/<repo>/releases/latest/download/dsh-remote-latest.apk
 **注意这意味着 debug 包与 release 包不再能互相覆盖** —— 手机上若还装着旧 debug 证书的版本，
 换到新证书的 release 必须先卸载一次。
 
-**已落地**：仓库 `https://github.com/Lisa4916/dsh-mobile-app`（public），
-Release `https://github.com/Lisa4916/dsh-mobile-app/releases/tag/v0.2.0` 已发布
-`dsh-remote-0.2.0-2.apk` / `dsh-remote-latest.apk` / `SHA256SUMS.txt` 三个资产。
-手机端固定地址实测 `302 → 302 → 200`，下载 1,930,818 B，
-SHA-256 `b10f01536c8a187be776d618c4bd9084421453e3e6f95bf5b4a6ce85cd2770f8` 与清单一致。
+**已落地**：仓库 `https://github.com/Lisa4916/dsh-mobile-app`（public）。
+已发布三个版本，手机端固定地址一直没变：
+
+| 版本 | 产物大小 | SHA-256（`dsh-remote-latest.apk`） |
+|---|---|---|
+| `v0.2.0` | 1,930,818 B | `b10f01536c8a187be776d618c4bd9084421453e3e6f95bf5b4a6ce85cd2770f8` |
+| `v0.3.0` | 1,930,946 B | `0904cdf3221120e27ec666939b33ca8da6da9f3d3d9339d0132ef368326aa1cc` |
+| `v0.4.0`（当前） | 1,930,950 B | `8d791d29ac331193929e7b0a1df060ccb1c73a12e7c210aa9b29afbad2b68abd` |
+
+固定地址始终 `200`，下载字节数与 `SHA256SUMS.txt` **逐字节一致**。
 
 #### 首次跑 CI 撞的三个坑（都是真失败，不是环境抖动）
 
@@ -706,10 +711,29 @@ SHA-256 `b10f01536c8a187be776d618c4bd9084421453e3e6f95bf5b4a6ce85cd2770f8` 与�
    `198.18.0.13`（代理 fake-IP），`api.github.com` / `codeload` / `raw.githubusercontent.com`
    都通，唯独 `github.com` 直连、HTTP 代理、SOCKS5、换 `--resolve` 指定官方 IP 全部
    `schannel: failed to receive handshake` / `OpenSSL: unexpected eof while reading`。
-   这时 `git push` / `git ls-remote` 一律不可用，但 **Contents API 可以照常提交**：
-   `PUT /repos/{owner}/{repo}/contents/{path}` 逐文件提交，再
-   `POST /git/tags` + `PATCH /git/refs/tags/vX.Y.Z` 把 annotated tag 重指到新提交。
+   这时 `git push` / `git ls-remote` 一律不可用，但 **`https://api.github.com` 完全正常** ——
+   改用 Git Data API 推整个提交（比 Contents API 逐文件更干净，一次形成一个提交）：
+
+   ```
+   POST /git/blobs（每个改动文件 base64）
+   → POST /git/trees（base_tree = 远端旧提交的 tree）
+   → POST /git/commits（parents = 远端旧提交）
+   → PATCH /git/refs/heads/master
+   → POST /git/tags + POST /git/refs（annotated tag）
+   ```
+
+   **两个必踩的坑：**
+   - 推送脚本后缀写成 `.mjs` 就不能用 `require`，报
+     `ReferenceError: require is not defined in ES module scope`；要么改 `.cjs`，
+     要么全用 `import { execFileSync } from 'node:child_process'`。
+   - 从 `version.properties` 取版本号的正则**必须锚行首**：`/^versionName=([\d.]+)\s*$/m`。
+     文件注释里还有一句 `-Pdsh.versionName=0.2.1`，不锚定就会把 tag 打成 `v0.2.1`
+     （踩过，用 `DELETE /git/refs/tags/v0.2.1` 删掉重打）。
+
    **发版前先探一句 `git ls-remote origin`**，不通就别指望 `publish-release.cjs` 能推上去。
+   另一个反复出现的前提：本地 `git config http.proxy` 指着 `127.0.0.1:7890`，而 mihomo 不在时
+   报 `Could not connect to server`；确认端口没人听就 `git config --local --unset http.proxy`
+   （`https.proxy` 一起 unset），不要留着这条配置去猜。`http.sslbackend openssl` 可以保留。
 
 ### 6.31 「装完就能连」：自动扫局域网，但 PIN 必须由用户给
 
@@ -835,6 +859,26 @@ isProtected: (host) => {
 家里 Wi-Fi 可信才行；不可信就把 `lanAuthEnabled` 改回 `true`，App 会自动退回
 「扫到电脑 + 输 PIN」。公网（cloudflared 隧道）永远要 PIN，不受这个开关影响。
 
+#### 落地记录（`v0.4.0`，2026-11-03）
+
+清数据冷启动 `TotalTime: 313`，`uiautomator dump` 得到 **0 个文本节点**（已在 WebView 里，
+列表页才会出现「DSH 手机遥控」标题）→ 免 PIN 直进成立。
+
+**真机验证时别把别人的弹窗当成本项目的缺陷**：第一屏看到的「用户须知 / 我已阅读并理解…
+同意合法合规使用 / 我已知晓并继续」是网页里 **dsh-purge 插件**的一次性弹窗，不是 App 弹窗，
+也不是 PIN 屏。判据：App 的列表页一定有「DSH 手机遥控」这个原生标题，且 WebView 内容层
+不会渲染 Native 按钮。
+
+关掉那个弹窗的正确手法（MIUI 拒 `input tap` 注入，点了毫无反应）：
+
+1. 先滚到底（`input swipe 540 1750 540 950 500` 连来 3 次，一次不够）；
+2. 复选框坐标必须用 PIL 从**原始 1080 宽截图**算（缩到 720 再量会整体偏）：
+   扫 `x∈[60,200] y∈[1950,2260]`，亮度 >110 且单行命中 ≥10 px → 得到上下两条边框
+   `y=2009..2011` / `2050..2052`、`x=136..175` → 中心 `(155, 2030)`；
+3. 按钮亮带 `y=2208..2325 x=424..844` → 中心 `(634, 2266)`；
+4. 两次点击用 `monkey -f` 的自定义手势脚本注入（`DispatchPointer` + `UserWait(600)`），
+   判据看 `Events injected:` 非 0；**先勾选、隔 ≥1.2 秒再点按钮**，顺序反了不生效。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）
@@ -873,6 +917,9 @@ isProtected: (host) => {
 | `publish-apk.cjs` | `node tools/publish-apk.cjs [--no-build] [--bump patch / minor / major]`，构建 release 并发布到 `dist/`（APK + `latest.json` + 自包含下载页） |
 | `serve-apk.cjs` | `node tools/serve-apk.cjs [port]`，把 `dist/` 发布成局域网下载页（默认 8123，支持 Range），另一台手机浏览器打开即可装机与收更新 |
 | `publish-release.cjs` | `node tools/publish-release.cjs --bump patch` 升版本并提示提交；`--no-bump` 打 tag 推 origin，触发 `release.yml` 建 GitHub Release（手机用固定地址收更新，见 §6.30） |
+| `push-via-api.mjs` | **兜底**：`github.com:443` 的 git 传输不通时，用 Git Data API（blobs → trees → commits → refs）把 HEAD 推到远端并打 tag（§6.30）。git 通道正常时用不到 |
+| `tag-only.mjs` | **兜底**：远端 master 已在正确位置、只缺 tag 时用它。取版本号的正则**必须锚行首**，否则会抓到注释里的旧版本号 |
+| `ui-dump.cjs` | `node ui-dump.cjs <ui.xml>`，把 `uiautomator dump` 的 XML 打成「文本 / 类 / bounds / 中心点」，给 adb 点控件找坐标的最快路径 |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 

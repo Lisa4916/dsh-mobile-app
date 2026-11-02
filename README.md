@@ -8,12 +8,17 @@
 App 会自己在同一 Wi-Fi 的 /24 里扫一遍（254 个地址并发、约 2 秒）找电脑；
 扫到就只需要输一次 8 位 PIN，扫不到才回落到扫码或手输。
 
+**v0.4 起（第 23 步）：电脑侧关掉「局域网要 PIN」时，装完直接进主界面。**
+扫到的那台电脑如果裸 GET 就下发 `Set-Cookie: dsh-auth-…`，App 认出来之后连 PIN 都不用输，
+第一屏就是 DeepSeek Harness。代价是同一 Wi-Fi 内任何设备都能免密访问 —— 家里网络可信才这么开。
+保留 PIN（默认）时退回「扫到电脑 + 输一次 8 位数字」。
+
 **局域网与公网都已在真机跑通。** 手机屏幕上就是电脑上正在进行的同一段对话，
 含流式输出、工具卡片、子智能体状态。公网走 Cloudflare quick tunnel，关掉 Wi-Fi 走 4G 也能进主界面。
 
 入口类型由 App 自动判断并标注（局域网 / 公网 / 本机），公网快速隧道地址会提示「每次重开都会变」。
 
-**分发**：发给另一台手机不用连线，走 	ools\publish-apk.cjs + 局域网下载页，或者走 GitHub Release（	ools\publish-release.cjs，手机存一个固定网址即可）。见「给第二台手机装机与收更新」。
+**分发**：发给另一台手机不用连线，走 `tools\publish-apk.cjs` + 局域网下载页，或者走 GitHub Release（`tools\publish-release.cjs`，手机存一个固定网址即可）。见「给第二台手机装机与收更新」。
 
 ## 架构
 
@@ -215,6 +220,7 @@ App 的处理（`RecoveryPlanner` + `HandshakeHealGate`）：
 14. **返回键要「一次只退一层」，页面其实有七层。** 旧版只认 `session / home / other` 三档，于是「首页 + 侧栏展开」按返回**直接退出 App**（多退了一步），而「会话知识库面板开着」会把手底下的会话页拉回首页（又少退了一层）。现在按 `panel → overlay → sidebar → session → feature → home` 判，每层只对应一个动作。两个坑：会话页也有 `aria-selected="true"`，所以 `session` 判据必须排在 `feature` 前面；`Escape` 对面板和会话页完全无效（实测 `layerN 0→2→2`），只有抽屉和菜单认它。详见 `AGENTS.md` §6.28。
 15. **「装完就能连」不能靠服务发现。** dsh-pocket 服务端 `lib` 下所有 js 里 `mdns|bonjour|discovery|broadcast|multicast|ssdp` **零命中**，它既不广播也不响应发现，手机侧只能自己扫 /24。三条实测结论：① 254 个地址、并发 48、TCP 超时 300ms，**1.86 秒**扫完；② **不能拿响应长度当指纹** —— 同一个「访问验证」页实测出现过 4210 B 与 3969 B 两种长度，判据只能是正文含 `DSH Pocket`；③ PIN 是 dsh-pocket **进程级**的钥匙（`~/.dsh/dsh-pocket/token-lan`），未认证时读不到，所以扫描能解决「电脑在哪」但解决不了「PIN 是多少」。详见 `AGENTS.md` §6.31。
 16. **让「装完直接进主界面」不能靠编 PIN，只能靠电脑侧放行。** 全新安装时手机里没有 PIN，也没有接口能读到它；把 PIN 编进公开仓库的 Release 包等于把钥匙发给每个下载的人。唯一干净的做法是电脑侧关掉 `lanAuthEnabled`（dsh-pocket 官方开关，`lib/index.js:336-339` 的 `isProtected` 对局域网返回它；公网永远要 PIN），App 扫到「裸 GET 就下发 `Set-Cookie: dsh-auth-`」的电脑就直接进主界面。代价是同一 Wi-Fi 内任何设备免密可见会话与文件。详见 `AGENTS.md` §6.32。
+17. **「更新后连不上」先查 Windows 的网络类别，不是 App 的问题。** 电脑把 WLAN 判成 `NetworkCategory=Public` 时，Windows 默认**挡掉全部入站**，手机 `ping 192.168.50.58` 就是 100% 丢包、`nc -z … 3081` 也失败 —— 看起来像「隧道坏了」。判据是 `Get-NetConnectionProfile` 那一行；`Set-NetConnectionProfile -InterfaceAlias "WLAN" -NetworkCategory Private`（需管理员）之后立刻 `0% packet loss`。注意 `Get-NetFirewallRule -DisplayName 'DSH Pocket*'` 可能一直是空的：通的是 Private 的默认放行，不是我们加过规则。
 
 ## 构建
 
@@ -230,9 +236,14 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
 ```powershell
 $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
-& $adb -s ZY22GHMK5F install -r app\build\outputs\apk\debug\app-debug.apk
-& $adb -s ZY22GHMK5F shell am start -n com.dsh.remote/.MainActivity
+$serial = (& $adb devices | Select-String 'device$' | ForEach-Object { ($_ -split '\s+')[0] })[0]
+& $adb -s $serial install -r app\build\outputs\apk\debug\app-debug.apk
+& $adb -s $serial shell am start -n com.dsh.remote/.MainActivity
 ```
+
+> 别把序列号写死：`ZY22GHMK5F`（motorola / Android 14）与 `8PCE7LJB99VG7TRO`（Redmi / Android 15）
+> 都跑过这个项目，换机后写死的脚本会以 `device 'XXX' not found` 收场。
+> 工具脚本统一走 `tools/device.cjs` 的 `resolveSerial()`（显式参数 > `DEV_SERIAL` > 唯一在线设备，多台就报错不猜）。
 
 > 需要 `GRADLE_USER_HOME` 隔离时加 `-g 'D:\dsh-mobile-app\.gradle-home'`，
 > 避开 `~/.gradle/init.d/aliyun-mirrors.gradle` 与 settings repositories 的冲突。
@@ -369,8 +380,9 @@ node tools\publish-release.cjs --no-bump        # 打 tag 并推送
 | 项 | 结果 |
 |---|---|
 | 单元测试 | `tests=189 failures=0 errors=0 skipped=0`（12 个测试类） |
-| APK | `app-debug.apk` 7,312,868 B / `app-release.apk` 1,930,946 B |
-| 装完直进 | release 包全新安装清数据后冷启动 `TotalTime: 522`，直接落 DSH 主界面，无 PIN 屏（`build-artifacts/v05-rel-first.png`） |
+| APK | `app-debug.apk` 7,312,868 B / `app-release.apk` 1,930,946 B（0.4.0 发版产物 1,930,950 B） |
+| 装完直进 | release 包全新安装清数据后冷启动 `TotalTime: 313`，直接落 DSH 主界面，无 PIN 屏（`build-artifacts/v05-rel-first.png`） |
+| Release | `v0.4.0` 已发布，固定地址 `200` / 1,930,950 B，SHA-256 `8d791d29…68abd`，与 `SHA256SUMS.txt` 一致 |
 | 返回互逆 | `tools/verify-back-layers.cjs` 7 场景全过（面板 / 菜单 / 抽屉 / 会话 / 功能视图 / 首页各按一次只退一层） |
 | 真机 instrumented | `PageProbeJsTest` 7 条 `OK (7 tests)`（`8PCE7LJB99VG7TRO`，Android 15） |
 | lint | 0 error / 22 warning |

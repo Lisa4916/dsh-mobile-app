@@ -1,10 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- 只申请真正用到的权限。
+         曾经这里还有：
+           ACCESS_NETWORK_STATE —— 计划做「断网时提示」，最终靠 WebView 的
+             onReceivedError(ERR_INTERNET_DISCONNECTED) 就够了，代码里从未引用；
+           POST_NOTIFICATIONS   —— 计划做「任务完成通知」，没做。
+         留着它们的代价不是安全，是**误导读代码的人**：看到权限就以为有对应功能。
+         要加回来时请连带功能一起加。 -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CAMERA" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
@@ -21,7 +26,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|fontScale|uiMode"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

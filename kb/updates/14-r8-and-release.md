@@ -1,4 +1,5 @@
 ---
+id: 3256d358
 title: R8 与发布配置：从「能 debug 就行」到可交付
 type: procedure
 tags: r8,proguard,release,签名,minify,发布
@@ -43,13 +44,31 @@ R8 常被理解成「压缩体积的工具」，其实它更大的价值是**优
 
 ```
 反射用到的类（JSON 模型、DI 注入点）
-@JavascriptInterface 注解的方法      ← WebView 桥，混淆后 JS 就调不到了
+@JavascriptInterface 注解的方法      ← WebView 桥，方法名进了字符串约定（见下）
 原生方法（JNI）
 Parcelable / Serializable 的字段名
 枚举的 values()/valueOf()
 ```
 
-**`@JavascriptInterface` 这条特别容易漏**，因为它是「字符串约定」：Java 侧的方法名要被 JS 侧按名字调，R8 不知道这层关系，会把 `keyboardHeight` 改成 `a`。症状是 release 包里桥完全不工作，debug 里一切正常。
+**`@JavascriptInterface` 的方法名是「字符串约定」**：JS 侧按名字调 `window.dshNative.keyboardHeight()`，R8 看不到这层关系，一旦改名桥就静默失效（debug 一切正常，release 里桥完全不工作）。
+
+但有一件事必须实测过再说：**AGP 内置的 R8 规则已经保住了它**。打开 `minifyEnabled` 构建后看 `app/build/outputs/mapping/release/mapping.txt`：
+
+```
+com.dsh.remote.WebBridge -> K0.x:                       ← 类名被混淆
+    1:2:boolean isNativeShell():27:27 -> isNativeShell    ← 方法名保留
+    1:5:float keyboardHeight():23 -> keyboardHeight       ← 方法名保留
+```
+
+类名被改、**方法名原样保留**。也就是说内置规则
+`-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }` 已经在起作用。
+
+所以正确结论是：**当前不写这条规则也不会坏**。那还要不要写？要，但理由不是「不写就坏」：
+
+1. 内置规则是 AGP 的实现细节，换版本可能变；这条是我们的契约，不该外包；
+2. 显式写出来，读代码的人才知道「桥依赖方法名」这个事实，不会顺手把 `@Keep` 加到错的地方。
+
+反面教训：把「必须手动 keep」当成事实写进文档，会让人以为自己在修一个不存在的 bug，同时**掩盖真正需要 keep 的东西**（反射、序列化字段名这类 R8 真的看不到的）。判据永远是 `mapping.txt`，不是记忆。
 
 ## 三、签名与密钥
 

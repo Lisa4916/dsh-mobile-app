@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+      只放代码里 `getString(...)` 真的取了的字符串。
+
+      历史：曾经还有 retry / saved 两条零引用，lint 报 UnusedResources。
+      注意本项目的 UI 是 `MainActivity.buildUi()` 用代码构造的，绝大多数文案是
+      Kotlin 字符串字面量（lint 的 SetTextI18n 有 10 条提醒）。要收敛成资源的话
+      是一次独立的改造，不是在这里补几行 —— 补了也不会有人用。
+    -->
     <string name="app_name">DSH 手机遥控</string>
     <string name="scan_title">扫描电脑上的二维码</string>
     <string name="scan_hint">把电脑屏幕上的局域网二维码放进框内</string>
     <string name="connect">连接</string>
     <string name="cancel">取消</string>
-    <string name="retry">重试</string>
-    <string name="saved">已保存的连接</string>
 </resources>

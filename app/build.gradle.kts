@@ -1,3 +1,4 @@
+import java.io.File
 import java.net.URI
 import java.util.Properties
 
@@ -57,11 +58,67 @@ android {
         buildConfigField("String", "LAN_PIN", "\"$lanPin\"")
     }
 
+    /**
+     * release 签名。
+     *
+     * 现实：这个项目没有自己的 keystore，也没有分发渠道 —— 它是本机自用工具。
+     * 但「release 包签不出来」会让 `assembleRelease` 只产出 `app-release-unsigned.apk`
+     * （`apksigner verify` 报 `Missing META-INF/MANIFEST.MF`，装不上），
+     * 于是「R8 打开后桥还工作吗」这类问题永远没人能验。
+     *
+     * 所以：**用 debug keystore 给 release 签名**，但只在本机没配 `dsh.releaseStoreFile`
+     * 时生效。真要分发时在 local.properties 里填四个字段（见下方 propFrom），
+     * 就会自动切到正式签名 —— 不改代码。
+     *
+     * 为什么这不算「把不安全的东西留在仓库里」：
+     *  - debug keystore 是 SDK 自带的公开密钥（口令 android/androiddebugkey），本来就不是秘密；
+     *  - 用它签的包**无法上架**（Play 拒绝 debug 证书），所以不会被误当正式版发布；
+     *  - 代价只是「同一台机器上 debug 与 release 可以互相覆盖安装」，自用场景反而是优点。
+     */
+    signingConfigs {
+        create("releaseLocal") {
+            val storePath = propFrom("dsh.releaseStoreFile")
+            if (storePath != null) {
+                storeFile = rootProject.file(storePath)
+                storePassword = propFrom("dsh.releaseStorePassword")
+                keyAlias = propFrom("dsh.releaseKeyAlias")
+                keyPassword = propFrom("dsh.releaseKeyPassword")
+            } else {
+                // SDK 自带的 debug keystore，**位置不是 SDK 目录** —— 实测在
+                // `~/.android/debug.keystore`（Windows: C:\Users\<user>\.android\debug.keystore）。
+                // AGP 生成它的时机是「第一次跑 debug 构建」，所以先试用户目录，再兜底找 SDK。
+                val home = System.getProperty("user.home")
+                val candidates = listOfNotNull(
+                    home?.let { File(File(it, ".android"), "debug.keystore") },
+                    (System.getenv("ANDROID_SDK_ROOT") ?: System.getenv("ANDROID_HOME")
+                        ?: localProps.getProperty("sdk.dir"))?.let { File(it, "debug.keystore") },
+                )
+                val keystore = candidates.firstOrNull { it.exists() }
+                if (keystore != null) {
+                    storeFile = keystore
+                    storePassword = "android"
+                    keyAlias = "androiddebugkey"
+                    keyPassword = "android"
+                } else {
+                    // 一个都没有：不静默失败，直接告诉使用者跑一次 debug 构建即可生成。
+                    logger.warn(
+                        "release 签名未配置，且找不到 debug.keystore。" +
+                            "先跑一次 :app:assembleDebug 由 AGP 生成它，或在 local.properties 里配 dsh.releaseStoreFile。"
+                    )
+                }
+            }
+        }
+    }
+
     buildTypes {
         getByName("debug") { isMinifyEnabled = false }
         getByName("release") {
-            isMinifyEnabled = false
+            // 第 15 步审计前这里是 false —— release 与 debug 除了签名完全一样，
+            // 于是 R8 相关的坑（keep 规则写错、反射/字符串约定被改）在真机上永远暴露不出来。
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("releaseLocal")
         }
     }
 
@@ -102,7 +159,6 @@ fun validateLanHost(host: String): String? {
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("com.google.android.material:material:1.12.0")
     // 二维码扫描：CameraX + ZXing 解码核心（不引第三方扫码 UI，自己画）
     implementation("androidx.camera:camera-core:1.4.0")

@@ -1,15 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ink">#111318</color>
-    <color name="ink_dim">#5A6070</color>
-    <color name="surface">#FFFFFF</color>
-    <color name="surface_dark">#0F1117</color>
+    <!--
+      这里只放「XML 侧真的会引用」的颜色。
+
+      历史：曾经有 ink / ink_dim / surface / surface_dark / scan_scrim / scan_frame / warn
+      七个，全部零引用 —— UI 是 `MainActivity.buildUi()` 用代码构造的，颜色取的是
+      companion object 里的 Kotlin 常量（`INK` / `INK_DIM` / `SURFACE` / `WARN`）。
+      两份定义并存的结果是：lint 报 7 条 UnusedResources，而且 `@color/warn`(#B45309)
+      与代码里的 `WARN`(#B26B00) 语义相同、色值不同，改一处不会影响另一处。
+      现在只留 XML 真正用到的三个；代码侧的颜色在 `MainActivity.kt` 的 companion object。
+    -->
     <!-- DSH 页面实测 body 背景色（CDP: rgb(21,21,23)）。WebView 容器与窗口底色都用它，
          这样键盘弹出动画期间即使露出一两帧容器底色，也与页面同色，看不见白闪。 -->
     <color name="page_dark">#151517</color>
     <color name="brand">#4F6EF7</color>
     <color name="brand_dim">#3A55CC</color>
-    <color name="scan_scrim">#CC000000</color>
-    <color name="scan_frame">#4F6EF7</color>
-    <color name="warn">#B45309</color>
 </resources>

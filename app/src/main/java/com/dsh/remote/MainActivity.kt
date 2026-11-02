@@ -18,6 +18,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -62,6 +63,16 @@ class MainActivity : AppCompatActivity() {
      * 全部落到 [RecoveryExecutor] 上，用纯 JVM 单测钉住。
      */
     private lateinit var recovery: RecoveryExecutor
+
+    /**
+     * 排队中的「健康复查」任务（见 [onPageFinished]）。
+     *
+     * 存引用是为了能取消：它延迟 1.4 秒执行，期间可能已经换地址或 Activity 销毁。
+     * `isFinishing` / `isDestroyed` 只是兜底判断，不是取消 —— 真到了回调执行的那一刻，
+     * WebView 可能已经被 destroy，`evaluateJavascript` 会静默失败，那一轮闸门就永远
+     * 卡在「还在同一轮故障里」，后续自愈全部被节流挡掉。
+     */
+    private var healthRecheck: Runnable? = null
 
     /** 最近一次 IME insets 报告的键盘高度（px），供 WebBridge 查询。 */
     internal var currentKeyboardHeight: Int = 0
@@ -504,7 +515,7 @@ class MainActivity : AppCompatActivity() {
                 row.addView(TextView(this).apply {
                     text = "快速隧道地址每次重开都会变，变了要重新扫码"
                     textSize = 11f
-                    setTextColor(0xFFB26B00.toInt())
+                    setTextColor(WARN)
                     setPadding(0, dp(2), 0, 0)
                 })
             }
@@ -513,9 +524,7 @@ class MainActivity : AppCompatActivity() {
                 textSize = 11f
                 setTextColor(INK_DIM)
                 setOnLongClickListener {
-                    val updated = connections.remove(e.id)
-                    applyList(updated)
-                    toast("已删除 ${e.label}")
+                    confirmDelete(e)
                     true
                 }
             })
@@ -531,6 +540,28 @@ class MainActivity : AppCompatActivity() {
         // store 已经是唯一真相，这里只需要重建视图
         savedRows.removeAllViews()
         if (updated.isEmpty()) savedRows.addView(emptyHint) else refreshSavedList()
+    }
+
+    /**
+     * 长按删除前先问一句。
+     *
+     * 之前是 `setOnLongClickListener { connections.remove(e.id) }` 直接删 —— 列表项
+     * 是整行可长按的，手指在滚动列表时稍微停一下就误触，而删掉的是一条**带 token
+     * 的连接地址**：删了就得回去电脑上重新扫码。这类操作没有任何理由不做确认。
+     *
+     * 用 AlertDialog 而不是 Toast + 撤销，因为撤销需要排队状态，而这里删除是同步写
+     * SharedPreferences；确认框更简单也更符合「删除」这种不可逆操作的惯例。
+     */
+    private fun confirmDelete(endpoint: Endpoint) {
+        AlertDialog.Builder(this)
+            .setTitle("删除这条连接？")
+            .setMessage("${endpoint.label}\n${endpoint.url}\n\n删除后需要重新扫码或手输地址才能连回来。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("删除") { _, _ ->
+                applyList(connections.remove(endpoint.id))
+                toast("已删除 ${endpoint.label}")
+            }
+            .show()
     }
 
     private fun labelFromUrl(url: String): String = Endpoint.hostOf(url) ?: "电脑"
@@ -560,6 +591,9 @@ class MainActivity : AppCompatActivity() {
     private fun connect(endpoint: Endpoint, persist: Boolean) {
         current = endpoint
         recovery.reset()
+        // 换地址时上一次排队中的健康复查已经没有意义：它会拿着新页面去问旧故障的结论。
+        healthRecheck?.let { webView.removeCallbacks(it) }
+        healthRecheck = null
         if (persist) applyList(connections.touch(endpoint.id))
 
         listRoot.visibility = View.GONE
@@ -652,9 +686,17 @@ class MainActivity : AppCompatActivity() {
         // 这时代码就再也收不到「已恢复」的信号，闸门会一直以为还在同一轮故障里。
         // 延迟到静默期之后再探一次，保证健康状态一定能被记录。
         if (recovery.needsHealthyConfirmation()) {
-            webView.postDelayed({
+            // 一定要存引用：这个 Runnable 活 1.4 秒，期间用户可能已经切到别的地址、
+            // 或者 Activity 被销毁。没有引用就没法在 onDestroy 里取消，
+            // 回调会在已经拆掉的 WebView 上跑（实测 `isFinishing` 拦得住 Activity 销毁，
+            // 但拦不住「换地址后还拿旧 current 探一次」）。
+            healthRecheck?.let { webView.removeCallbacks(it) }
+            val recheck = Runnable {
+                healthRecheck = null
                 if (!isFinishing && !isDestroyed) healHandshakeIfNeeded()
-            }, HandshakeHealGate.PROBE_QUIET_AFTER_ACT_MS + 200L)
+            }
+            healthRecheck = recheck
+            webView.postDelayed(recheck, HandshakeHealGate.PROBE_QUIET_AFTER_ACT_MS + 200L)
         }
     }
 
@@ -874,8 +916,38 @@ class MainActivity : AppCompatActivity() {
     /** 返回决策逻辑（纯 JVM 类，可被单测覆盖，见 BackNavigationDecider）。 */
     private val backDecider = BackNavigationDecider()
 
+    /**
+     * 字号 / 深色模式变化时**不重建 Activity**。
+     *
+     * 病灶：manifest 的 `configChanges` 原来只有 `orientation|screenSize|keyboardHidden|screenLayout`。
+     * 用户去系统设置里调一次字体大小，Activity 就被 relaunch —— 实测 logcat
+     * `WindowManager: finishDrawing of relaunch: Window{... com.dsh.remote/.MainActivity} 290ms`，
+     * 页面重新加载回 `HARNESS / Loading plugins…`，DSH 那边正在跑的会话界面全部丢状态。
+     * 这不是「样式没跟上」，是一次完整的重建。
+     *
+     * 所以把 `fontScale|uiMode` 加进 `configChanges`，并在这里显式处理：
+     *   · 字号变了 —— 连接列表是代码构造的 TextView，字号取的是固定 `textSize`（sp），
+     *     系统缩放会自然生效，只需重建列表视图让它按新密度量一遍；
+     *   · WebView 里的页面自己按 CSS 走，我们不动它（强刷会丢会话状态，那正是要避免的）；
+     *   · uiMode（深色/浅色）变了 —— 本项目没有 `values-night`，主题不变，
+     *     但状态栏前景跟着页面底色走这件事要重新确认一次。
+     *
+     * 不做 `super` 之后的额外重建：`onConfigurationChanged` 的契约就是「我自己处理了」。
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (this::savedRows.isInitialized) refreshSavedList()
+        if (this::webView.isInitialized && webView.visibility == View.VISIBLE) {
+            applyBarIconTheme(darkBackground = true)
+        }
+    }
+
     override fun onDestroy() {
         if (this::webView.isInitialized) {
+            // 先撤掉还在排队的延迟任务。健康复查那个 Runnable 活 1.4 秒，
+            // 不取消就会在已销毁的 WebView 上跑（`isFinishing` 只是兜底，不是取消）。
+            healthRecheck?.let { webView.removeCallbacks(it) }
+            healthRecheck = null
             // 顺序有讲究：先把 WebView 从视图树摘掉，再断开所有指向本 Activity 的引用，
             // 最后才 destroy。少做一步都会让 Activity 在配置变更（旋转）后被 WebView
             // 的 client / JS 接口悄悄持有，表现为「转屏几次后内存持续上涨」。
@@ -900,6 +972,14 @@ class MainActivity : AppCompatActivity() {
         val INK = 0xFF111318.toInt()
         val INK_DIM = 0xFF5A6070.toInt()
         val SURFACE = 0xFFFFFFFF.toInt()
+
+        /**
+         * 「提醒但不用报错色」的橙。
+         *
+         * 与 `@color/warn`（#B45309）语义相同、色值不同 —— 历史遗留。这里统一成一个
+         * 常量，代码里不再出现裸的 `0xFFB26B00`，以后要改成 `@color/warn` 只改这一行。
+         */
+        val WARN = 0xFFB26B00.toInt()
 
         /**
          * 首次启动时尝试自动连接的地址，**构建时注入**：

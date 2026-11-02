@@ -84,7 +84,7 @@ adb shell am instrument -w -r -e class com.dsh.remote.PageProbeJsTest \\
 ```
 
 CI 见 `.github/workflows/ci.yml`：`assembleDebug` + `testDebugUnitTest`（`--rerun-tasks`）+ `lintDebug`。
-lint 当前基线 **0 error / 27 warning**（warnings 不挡合并）。
+lint 当前基线 **0 error / 20 warning**（warnings 不挡合并）。
 
 ## 内置地址怎么配（不再硬编码）
 
@@ -193,7 +193,7 @@ $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
 | 单元测试 | `tests=135 failures=0 errors=0 skipped=0`（10 个测试类） |
 | APK | 7,485,956 B（第 14 步后全量构建） |
 | 真机 instrumented | `PageProbeJsTest` 7 条 `OK (7 tests)`（`8PCE7LJB99VG7TRO`，Android 15） |
-| lint | 0 error / 27 warning |
+| lint | 0 error / 20 warning |
 | 局域网 | 扫码/手输后进入 DSH 主界面 |
 | 公网 4G | 关 Wi-Fi 走 4G，Redmi `8PCE7LJB99VG7TRO` 一次通过（证据图 `docs/evidence/step7-public-4g.png`） |
 | PIN 页自愈 | CDP 抓到 `?token=…&dsh-pocket-retry=1` 重连跳 + cookie 重新下发 |

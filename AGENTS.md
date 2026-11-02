@@ -645,5 +645,7 @@ group: 外壳
 验证方法：把 `local.properties` 改名后 `--rerun-tasks` 重跑，必须 `BUILD SUCCESSFUL` 且
 `BuildConfig.LAN_HOST=""`。这条不验，第一次 push 就会红。
 
-lint 基线：**0 error / 27 warning**（`UnusedResources` 9、`SetTextI18n` 8、`GradleDependency` 3、
-`MonochromeLauncherIcon` 2、其余各 1）。AGP 默认 `abortOnError` 只对 error 生效，所以 warnings 不挡合并。
+lint 基线：**0 error / 20 warning**（`SetTextI18n` 10、`GradleDependency` 3、`MonochromeLauncherIcon` 2、
+其余各 1）。AGP 默认 `abortOnError` 只对 error 生效，所以 warnings 不挡合并。
+第 16 步把 9 条 `UnusedResources` 清零（删掉 XML 侧零引用的 7 个颜色与 2 个字符串），
+现在剩下的 10 条 `SetTextI18n` 是「文案写死在 Kotlin 里」——要收敛成资源是一次独立改造，不是补几行 strings。

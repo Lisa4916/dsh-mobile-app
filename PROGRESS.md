@@ -29,13 +29,15 @@
 | 13 | 知识库二次强化：纠 4 篇过时/错误结论 + 新增 3 篇 | ✅ | base 内 13 → 16 篇；`passage` 全部 `ready`；`kb-verify` 全绿 |
 | 14 | 安全与可见性修复：同域判定 / 状态栏前景 / 文案 / 渲染进程兜底 | ✅ | 全量 `tests=135`；真机四项逐条验证通过（第 14 步） |
 | 15 | 全网检索手机开发资料 + 知识库扩到 25 篇 | ✅ | base 内 16 → 25 篇；`passage` 全部 `ready`；`kb-verify` 全绿 |
+| 16 | 审计问题的 P0/P1 修复：release 通道打通、权限依赖清理、字号不再重建、删除加确认 | ✅ | release APK 1,976,330 B 签名有效且真机可用；`tests=135`；lint 29→20 |
 
 **测试基线：JVM 单测全量 `tests=135 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
 `EndpointTest` 24 + `HandshakeHealGateTest` 10 + `HostMatchTest` 17 + `PageProbeTest` 20 +
 `RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
-**真机 instrumented：`PageProbeJsTest` 7 条 `OK (7 tests)`**（`8PCE7LJB99VG7TRO`，Android 15）
-**APK：`app-debug.apk` 7,485,956 B**（versionName 0.1.0，versionCode 1）
+**真机 instrumented：`PageProbeJsTest` 7 条 `OK (7 tests)`**（Redmi `8PCE7LJB99VG7TRO`，Android 15）
+**APK：`app-debug.apk` 7,296,484 B / `app-release.apk` 1,976,330 B**（versionName 0.1.0，versionCode 1）
+**lint：0 error / 20 warning**
 
 ---
 
@@ -1064,3 +1066,142 @@ FTS 召回抽检：
 命名隧道（固定域名）是第 7 步的可选项，需要 Cloudflare 账号 + 自有域名 + Tunnel Token，
 走 `tunnel.setConfig`；它解决的是「地址每次重开都变」这个体验问题，不是可用性问题。
 
+
+---
+
+## 第 16 步：审计问题按优先级修复（P0/P1）✅
+
+第 15 步的只读审计（时间 2026-11-02）产出了一份按严重度排序的问题清单。这一步按顺序修掉
+P0 两条与 P1 四条，P2 里顺手能做的也一起做（lint 与仓库卫生）。
+
+### 16.1 P0-1：`gradlew` 没有可执行位，CI 一定红
+
+```
+git ls-tree HEAD gradlew
+100644 blob f5feea6...   gradlew        ← 应该是 100755
+```
+
+`.github/workflows/ci.yml` 里用的是 `./gradlew --no-daemon ...`，Ubuntu runner 上会直接
+`Permission denied`。这个 workflow 建好之后从未在 GitHub 真跑过（本机没有 runner），
+所以一直没暴露。
+
+Windows 默认 `core.fileMode=false`，改文件系统属性 git 看不见 —— 必须走索引：
+
+```
+git update-index --chmod=+x gradlew
+git ls-files -s gradlew      # 100755
+```
+
+`git status` 里它表现为「`M gradlew` 但 0 行改动」，这正是 mode 位在变的形态，别以为是噪音。
+
+### 16.2 P0-2：release 通道形同虚设
+
+三件事叠在一起，让「release 构建」这件事看起来存在、实际不可用：
+
+| 现象 | 实测证据 |
+|---|---|
+| 引用了不存在的规则文件 | `app/build.gradle.kts` 的 `proguardFiles(..., "proguard-rules.pro")`，而该文件不存在。AGP 只打一行 `Supplied proguard configuration does not exist`，**构建照样 SUCCESSFUL** |
+| 产物根本不能装 | `app-release-unsigned.apk` 6,007,317 B；`apksigner verify` → `DOES NOT VERIFY / Missing META-INF/MANIFEST.MF` |
+| 开关是关的 | `isMinifyEnabled = false`，release 与 debug 除签名外完全一致 |
+
+修法三条一起做：
+
+1. 补 `app/proguard-rules.pro`。里面**只写真正会因为混淆/裁剪坏掉的东西**，并写明
+   「不写这条当前也不会坏」的理由（见 16.5）。
+2. `isMinifyEnabled = true` + `isShrinkResources = true`。
+3. 配签名。此处踩了一个坑：原先的代码在 **SDK 目录**下找 `debug.keystore`，
+   报 `SigningConfig "releaseLocal" is missing required property "storeFile"`。
+   实测它不在 SDK 里，而在 **`~/.android/debug.keystore`**（`C:\Users\yaoqi\.android\debug.keystore`），
+   由 AGP 在第一次 debug 构建时生成。所以改成：先读 `local.properties` 的
+   `dsh.releaseStoreFile`（有则用真实发布 key），否则依次找用户目录与 SDK 目录的
+   debug keystore，一个都没有就 `logger.warn` 说明补救办法，而不是静默产出一个不能装的包。
+
+结果：
+
+```
+app-release.apk  1,976,330 B      （原 7,485,956 B 的 debug 包）
+apksigner verify → Signer #1 certificate DN: C=US, O=Android, CN=Android Debug
+```
+
+**关键验证不是「构建过了」，是「R8 之后 App 还能跑」** —— 真机装上 release 包：
+进主界面（`topResumedActivity=com.dsh.remote/.MainActivity`）、点输入框拉起键盘时
+输入框正确让位到键盘上方（说明 `@JavascriptInterface` 的 JS 桥在 R8 之后仍然可用）。
+
+### 16.3 P1：四个「不致命但会咬人」的问题
+
+1. **零使用的权限与依赖**
+   `POST_NOTIFICATIONS` / `ACCESS_NETWORK_STATE` 代码引用各 0 处（原本计划做通知与断网提示，
+   最终靠 `onReceivedError` 就够了）；`androidx.constraintlayout` 的 `ConstraintLayout` 出现 0 处
+   （UI 全是代码构造的 `LinearLayout`）。全部删除。
+   留着的代价不是安全，是**误导读代码的人**：看到权限就以为有对应功能。
+
+2. **改字号会 relaunch**
+   `configChanges` 缺 `fontScale|uiMode`。实测 `settings put system font_scale 1.3` →
+   logcat `WindowManager: finishDrawing of relaunch: Window{... com.dsh.remote/.MainActivity} 290ms`，
+   页面重新加载回 `HARNESS / Loading plugins…`，DSH 那边正在跑的会话界面全丢状态。
+   补进 `configChanges` 并实现 `onConfigurationChanged`：只重建连接列表视图与状态栏前景，
+   **不动 WebView**（强刷正是要避免的那件事）。
+   验证：`font_scale` 1.15 → 1.3 → 1.15 两轮，pid 与外层 ActivityRecord 都不变。
+
+3. **`postDelayed` 的 Runnable 无法取消**
+   `onPageFinished` 里排的那个「健康复查」活 1.4 秒，原来连引用都没存，全文件 `removeCallbacks` 0 处。
+   现在存 `healthRecheck`，并在三处取消：`onPageFinished` 重排前、`connect()` 换地址时、`onDestroy()`。
+   `isFinishing` 只是兜底判断，不是取消 —— 真到回调执行那一刻 WebView 可能已经 destroy，
+   `evaluateJavascript` 会静默失败，那一轮闸门就永远卡在「还在同一轮故障里」，后续自愈全被节流挡掉。
+
+4. **长按删除无确认**
+   删的是一条**带 token 的连接地址**，删了要回电脑重新扫码。改走 `confirmDelete()` +
+   `AlertDialog`（标题「删除这条连接？」+ 地址 + 后果说明）。用对话框而不是 Toast 撤销，
+   因为删除是同步写 SharedPreferences，撤销要维护排队状态，不值得。
+
+### 16.4 P2：lint 与仓库卫生
+
+- `colors.xml` 原来 10 个颜色里 **7 个零引用**（UI 颜色取的是 Kotlin 常量），删到只剩
+  XML 真正引用的 `page_dark` / `brand` / `brand_dim`；`strings.xml` 删 `retry` / `saved`。
+  **lint 29 → 20 warning，`UnusedResources` 9 → 0。**
+- `MainActivity` 里裸的 `0xFFB26B00` 提成 `WARN` 常量（它与 `@color/warn` 的 `#B45309`
+  语义相同、色值不同，两份定义并存最容易改一处漏一处；现在只剩一处）。
+- 删 `tools/` 下 12 个 `_` 前缀一次性探针（`_probe*.py`、`_prof*.py`、`_px.py`、`_tabs.cjs` 等）。
+- `git gc --aggressive --prune=now`：382 loose objects / 66.55 MiB → **1 pack / 65.95 MiB**。
+  注意 `.git` 仍然是 66 MB 量级 —— 最大的 blob 是历史里的 6 张 3 MB 截图，
+  gc 只能压紧不能变小；真要瘦身得 `git filter-repo`（已推送，破坏性，未做）。
+- 文档回填：`README.md` 与 `AGENTS.md` 里写的 lint 基线是 27，实测 29（第 14 步新增
+  `NewApi` 与 `LockedOrientationActivity` 后没回填）。现在统一为 20。
+
+### 16.5 被这次实测推翻的一条知识库结论
+
+`kb/updates/14-r8-and-release.md` 原文写「`@JavascriptInterface` 的方法必须手动 keep，
+R8 不知道这层关系，会把 `keyboardHeight` 改成 `a`」。打开 minify 后的
+`app/build/outputs/mapping/release/mapping.txt`：
+
+```
+com.dsh.remote.WebBridge -> K0.x:                       ← 类名被混淆
+    1:2:boolean isNativeShell():27:27 -> isNativeShell    ← 方法名保留
+    1:5:float keyboardHeight():23 -> keyboardHeight       ← 方法名保留
+```
+
+类名被改、**方法名原样保留** —— AGP 内置规则
+`-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }` 已经在起作用。
+所以正确结论是「**当前不写也不会坏**」，但仍显式写：内置规则是 AGP 的实现细节不该外包，
+且显式写能让读代码的人知道「桥依赖方法名」这个事实。
+
+把「必须手动 keep」当成事实写进文档的坏处是双重的：让人以为修了一个不存在的 bug，
+同时**掩盖真正需要 keep 的东西**（反射、序列化字段名这类 R8 真的看不到的）。
+判据永远是 `mapping.txt`，不是记忆。
+
+已用 `tools/kb-update.mjs --only '^14-'` 把该篇更新到 v2（3338 字），
+`kb-verify` 全绿。改库前 `VACUUM INTO` 出快照 `snapshot-20261102-1330.sqlite`。
+
+### 16.6 结果
+
+```
+tests=135 failures=0 errors=0        （10 个测试类）
+lint  0 error / 20 warning           （原 29）
+debug   APK 7,296,484 B
+release APK 1,976,330 B  签名有效、真机可用
+真机：release 进主界面 / 键盘避让正确 / 长按弹确认框 / 改字号不 relaunch / 断网回落列表页
+```
+
+提交 `6672510`。**仍未处理**（留给下一步）：CI 从未在 GitHub 真跑过；
+`.git` 66 MB 里的历史截图未清；`MainActivity` 仍有约 1000 行；
+`SetTextI18n` 那 10 条要靠「把文案收敛进 strings.xml」这类独立改造。

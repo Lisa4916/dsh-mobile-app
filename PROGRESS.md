@@ -33,6 +33,7 @@
 | 17 | 运行态全量功能回归（14 项主流程 + 3 项自愈/兜底） | ✅ | 全部符合设计；另修 2 处工具缺陷（硬编码序列号、依赖残留手势文件） |
 | 18 | 启动时侧栏不再闪：禁掉移动端 frame 侧栏首次就位的 transition | ✅ | 冷启动逐帧采样 `sideL >= -60` 帧数 1 → 0（两轮）；`tests=135`；lint 20 warning |
 | 19 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ | 真机 7 种层叠状态全通过（`tools/verify-back-layers.cjs`）；`tests=142`；lint 0/20 |
+| 20 | 第二台手机装机与收更新：版本号单一来源 + 局域网分发页 | ✅ | 手机侧 curl 下载 1,930,818 B，SHA-256 与清单一致；db install -r Success |
 
 **测试基线：JVM 单测全量 `tests=142 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
@@ -1492,3 +1493,84 @@ sideL >= -60 的帧数 = 0 ；侧栏闪动 = 否 ✅
 | APK | `app-debug.apk` 7,296,484 B |
 | 首页按返回 | 退到桌面，`back: layer=HOME action=EXIT_APP` |
 | 侧栏手动展开 / 会话页 | 未被改坏（7/7 用例里含这两项） |
+
+---
+
+## 第 20 步：第二台手机装机与收更新 ✅
+
+用户问题：「如何让我的另一部安装了此软件的手机，接到软件更新」。
+
+### 20.1 先查前提：能不能走正规渠道
+
+| 检查 | 实测结果 | 结论 |
+|---|---|---|
+| `git remote -v` | 空 | 没有远端仓库，GitHub Releases / 自建 update server 都无从谈起 |
+| debug 与 release 签名 | 两个包的 `apksigner verify --print-certs` 都是 `CN=Android Debug`、`SHA-256 ca77c1d1…` | **能互相覆盖安装**，这是不重装的前提 |
+| keystore | `C:\Users\yaoqi\.android\debug.keystore`（2618 B），`releaseLocal` 用的就是它 | 同一张证书，可覆盖 |
+| 版本号来源 | 写死在 `app/build.gradle.kts`（`versionCode = 1`） | 每次发版都得手改源码，且忘了就装不上 |
+
+### 20.2 三个改动
+
+**a) 版本号单一来源** —— 新建仓库根 `version.properties`：
+
+```
+versionCode=2
+versionName=0.2.0
+```
+
+`app/build.gradle.kts` 里读它，`-Pdsh.versionCode=` 可临时覆盖（CI 用）。
+
+> **踩过的坑：不能用 `git rev-list --count HEAD` 当 versionCode。**
+> CI 是浅克隆（`actions/checkout` 默认 `fetch-depth: 1`），算出来永远是 1，
+> 打出的包比手机上装的还旧，Android 直接拒装，而用户只会看到「应用未安装」。
+
+**b) `tools/publish-apk.cjs`** —— 构建 release 并发布到 `dist/`：
+`dsh-remote-<ver>-<code>.apk`（稳定名，便于肉眼区分）＋ `dsh-remote-latest.apk`（固定名）
+＋ `latest.json`（版本 / 大小 / SHA-256 / 构建时间）＋ `index.html`（自包含下载页，内联 CSS）。
+`--bump patch|minor|major` 先把 `version.properties` 加一档再构建。
+
+> 默认走 **release** 而不是 debug：debug 7.3 MB、带 `debuggable`、开着 WebView 调试；
+> release 1.8 MB、R8 过一遍。日常用 release，只有抓 CDP 时才临时换 debug。
+>
+> 脚本实现坑：`execFileSync(GRADLE, args)` 对 `.bat` 报 `spawnSync … ENOENT`，
+> 必须 `shell: true` 并把参数拼成一行。
+
+**c) `tools/serve-apk.cjs`** —— 把 `dist/` 起成局域网下载页（默认 `0.0.0.0:8123`）：
+只读、支持 `Range`（手机断点续传）、防目录穿越、`Cache-Control: no-store`，
+`/version.json` 与 `/latest.json` 都返回清单，启动时打印本机局域网 IPv4（跳过 `169.254.*`）。
+
+`dist/` 已写进 `.gitignore`（里面是二进制产物与清单，版本号本身记在 `version.properties`）。
+
+### 20.3 实测验证
+
+| 项 | 结果 |
+|---|---|
+| `node tools/publish-apk.cjs` | `dist/dsh-remote-0.2.0-2.apk` **1,930,818 B**，SHA-256 `42db6a9b…ac2048f` |
+| `aapt2 dump badging` | `versionCode='2' versionName='0.2.0'`、`minSdk 24`、`targetSdk 35` |
+| `adb -s ZY22GHMK5F install -r dist\…apk` | `Success`（覆盖安装可用，连接列表不丢） |
+| 分发页 | `GET /` → `200 1831B`；`GET /version.json` → 清单 JSON |
+| **手机侧真实下载** | `curl` 拉 `http://192.168.50.58:8123/dsh-remote-latest.apk` → **1,930,818 B**，`sha256sum` 与清单**逐字节一致** |
+
+> 手机上没有 `wget`（`toybox: Unknown command wget`），验连通性用 `curl`。
+
+### 20.4 用户侧操作（已写进 README）
+
+```powershell
+# 第一次
+node tools\publish-apk.cjs
+node tools\serve-apk.cjs          # 打印 http://<本机IP>:8123/
+
+# 之后每次更新
+node tools\publish-apk.cjs --bump patch
+```
+
+另一台手机同一 Wi-Fi 下浏览器打开那个地址 → 下载 → 覆盖安装。
+**覆盖安装不丢已保存的连接**（SharedPreferences 只在卸载时清）。
+
+### 20.5 三条前提（AGENTS §6.29）
+
+1. 两个包必须同一张证书 —— 换成自己的 keystore 后，手机上那个包就再也覆盖不上了。
+2. versionCode 只能升不能降 —— 所以不能用浅克隆下的提交数。
+3. 拿不到 APK 是第三种完全不同的原因 —— 用 `serve-apk.cjs` 给个局域网下载页。
+
+三者都表现为「装不上」，但修法互不相同，排查时先分清是哪一类。

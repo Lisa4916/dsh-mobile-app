@@ -188,6 +188,50 @@ $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
 > 需要 `GRADLE_USER_HOME` 隔离时加 `-g 'D:\dsh-mobile-app\.gradle-home'`，
 > 避开 `~/.gradle/init.d/aliyun-mirrors.gradle` 与 settings repositories 的冲突。
 
+## 给第二台手机装机与收更新
+
+装过一次之后就不必再接电脑了——**用浏览器下载页**，以后每次刷新同一个地址就是新版本。
+
+### 第一次
+
+```powershell
+# 1) 构建 release 并发布到 dist/（会自动读 version.properties 的版本号）
+node tools\publish-apk.cjs
+
+# 2) 起局域网分发页（保持这个窗口开着）
+node tools\serve-apk.cjs
+```
+
+第二步会打印本机局域网地址，例如 `http://192.168.50.58:8123/`。
+另一台手机连**同一个 Wi-Fi**，浏览器打开这个地址 → 点「下载并安装」。
+第一次装需要在浏览器提示里允许一次「安装未知应用」。
+
+### 之后每次更新
+
+```powershell
+node tools\publish-apk.cjs --bump patch   # 版本号 +1，重新构建发布
+```
+
+手机上刷新下载页（或直接开 `http://<IP>:8123/`），点下载覆盖安装即可。
+
+**覆盖安装不会丢已保存的连接** —— 连接列表在 SharedPreferences 里，只有卸载才会清。
+`dist/latest.json` 里有版本号、大小和 SHA-256，手机上想核对就点开 `http://<IP>:8123/version.json`。
+
+### 三条容易踩的前提（都已固化进脚本）
+
+1. **两个包必须是同一张证书。** `app/build.gradle.kts` 的 `releaseLocal` 用的是
+   `~/.android/debug.keystore`，所以 debug 包与 release 包能互相覆盖（实测两个
+   `apksigner verify --print-certs` 都是 `SHA-256 ca77c1d1…`）。哪天换成自己的 keystore，
+   **已经装在手机上的包就再也覆盖不上了**，只能卸载重装。
+2. **versionCode 只能升不能降。** 现在由 `version.properties` 显式管理——**不要改成 git 提交数**，
+   CI 是浅克隆会算成 1，打出来的包比手机上装的还旧，只能卸载。
+3. **装 release 而不是 debug。** debug 包体积 7.3 MB（release 1.8 MB）、带 `debuggable`、
+   开着 WebView 调试。日常用 release，只有要抓 CDP 时才临时装 debug。
+
+> `dist/` 已 gitignore（里面是二进制产物与清单）。分发页只服务局域网，没有鉴权，
+> 别把这个端口转到公网 —— 里面虽然不含 PIN（PIN 存在每台手机自己的 SharedPreferences 里），
+> 但没必要对外暴露你的构建。
+
 ## 验证证据
 
 | 项 | 结果 |
@@ -236,6 +280,8 @@ $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
 | `verify-no-sidebar-flash.cjs` | 注入去过渡样式后 reload 复测，验证侧栏修法有效 |
 | `probe-layer.cjs` | 把页面构造到 7 种层叠状态，逐一打印页面自报的层（panel/overlay/sidebar/session/feature/home），改判据前后都跑 |
 | `verify-back-layers.cjs` | 7 个场景各按一次真实返回键，断言「只退一层」。**「返回是否与进入互逆」的唯一判据** |
+| `publish-apk.cjs` | 构建 release 并发布到 `dist/`（APK + `latest.json` + 自包含下载页）；`--bump patch` 先把版本号 +1 |
+| `serve-apk.cjs` | 把 `dist/` 发布成局域网下载页（默认 8123），另一台手机浏览器打开即可装机与收更新 |
 
 `_` 前缀的是早期一次性探针（`_probe-cur.cjs`、`_probe-page.cjs`、`_probe-storage.cjs`、`_tabs.cjs`、`_test-reset.cjs`），留作参考，不进主流程。
 

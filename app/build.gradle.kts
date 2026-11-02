@@ -29,6 +29,29 @@ fun propFrom(name: String): String? =
     (findProperty(name) as String?)?.takeIf { value -> value.isNotBlank() }
         ?: localProps.getProperty(name)?.takeIf { value -> value.isNotBlank() }
 
+/**
+ * 版本号：`version.properties` 是唯一事实来源，`-Pdsh.versionCode` 可临时覆盖。
+ *
+ * **为什么不用 git 提交数**：CI 是浅克隆，`git rev-list --count HEAD` 在 runner 上
+ * 会得到 1，比本地小。而 Android 只允许 versionCode **不降**的覆盖安装 ——
+ * 一旦发出去一个更小的包，另一台手机就得先卸载再装，连接列表和 cookie 全丢。
+ * 发版前在 `version.properties` bump 一次，两条渠道（本机 adb / CI 产物）都跟着走。
+ */
+val versionProps = Properties().apply {
+    val f = rootProject.file("version.properties")
+    if (f.exists()) f.inputStream().use { stream -> load(stream) }
+}
+
+val appVersionCode: Int =
+    (findProperty("dsh.versionCode") as String?)?.takeIf { it.isNotBlank() }?.toInt()
+        ?: versionProps.getProperty("versionCode")?.trim()?.toIntOrNull()
+        ?: 1
+
+val appVersionName: String =
+    (findProperty("dsh.versionName") as String?)?.takeIf { it.isNotBlank() }
+        ?: versionProps.getProperty("versionName")?.trim()?.takeIf { it.isNotEmpty() }
+        ?: "0.1.0"
+
 android {
     namespace = "com.dsh.remote"
     compileSdk = 35
@@ -37,8 +60,8 @@ android {
         applicationId = "com.dsh.remote"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // 注入的是**两个原始字段**，不是拼好的 URL。

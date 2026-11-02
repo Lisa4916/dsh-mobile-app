@@ -104,6 +104,7 @@ dsh.lanPin=<token-lan 的内容>
 | 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
 | 12 | 体检剩余四项：删无用权限与资源 / release 补齐 / 长按删除加确认 / 收敛 strings 与颜色 | ✅ 第 16 步 |
 | 13 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ 见 §6.28 |
+| 14 | 第二台手机装机与收更新：版本号单一来源 + release 分发页 | ✅ 见 §6.29 |
 
 **第 7 项现状（2026-11-02 重测，旧结论已作废）**：`cloudflared.exe` 在
 `C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B，2026.10.7）。
@@ -602,6 +603,43 @@ const DEV = resolveSerial(process.env.DEV_SERIAL);   // 参数 > DEV_SERIAL > �
 
 排查时先看日志：`adb logcat | Select-String 'DshRemote: back:'`，格式 `back: layer=… action=…`。
 
+### 6.29 第二台手机装机与收更新：三条前提缺一不可
+
+需求是「另一部装了这软件的手机也能收到更新」。做不到的原因几乎永远是下面三条之一，
+而且**每条都表现为「装不上」，但真实原因完全不同**，别混着猜：
+
+1. **签名不一致** → 只能卸载重装（连接列表全丢）。
+   现在 `app/build.gradle.kts` 的 `releaseLocal` 用 `~/.android/debug.keystore`，
+   实测 debug 与 release 两个包的 `apksigner verify --print-certs` 都是
+   `SHA-256 ca77c1d16e8149d147caa61f9d5b57360338fb8ed3c8888d8be305c8102c8afc`，能互相覆盖。
+   **一旦换成自己的 keystore，手机上那个包就再也覆盖不上了** —— 要么先卸载，要么永远用同一张。
+2. **versionCode 下降** → 同样只能卸载重装。
+   所以版本号**不能**用 `git rev-list --count HEAD`：CI 浅克隆会算成 1。
+   现在唯一来源是仓库根的 `version.properties`（`versionCode=2 / versionName=0.2.0`），
+   `-Pdsh.versionCode=` 可临时覆盖。发版前 `node tools/publish-apk.cjs --bump patch`。
+3. **手机根本拿不到 APK** → 用 `tools/serve-apk.cjs` 起局域网下载页（默认 8123），
+   另一台手机同一 Wi-Fi 下浏览器打开 `http://<本机IP>:8123/` 即可。
+   手机侧没有 `wget`（`toybox: Unknown command wget`），验证连通性用 `curl`。
+
+分发链路（都已固化成脚本）：
+
+```powershell
+node tools\publish-apk.cjs --bump patch   # 版本 +1 → 构建 release → 发到 dist/
+node tools\serve-apk.cjs                  # 起 8123，打印本机局域网地址
+```
+
+`dist/` 内容：`dsh-remote-<ver>-<code>.apk`（稳定名，便于肉眼区分）、
+`dsh-remote-latest.apk`（固定名）、`latest.json`（版本/大小/SHA-256/构建时间）、`index.html`（自包含下载页）。
+`dist/` 已 gitignore；服务器只服务局域网、无鉴权，**不要转公网**。
+
+**装 release 而不是 debug**：debug 包 7.3 MB 带 `debuggable` 且开着 WebView 调试，
+release 1.8 MB、R8 过一遍。日常用 release，只有抓 CDP 时才临时换 debug。
+
+实测验证（2026-11-02）：`dist/dsh-remote-0.2.0-2.apk` 1,930,818 B，
+手机侧 `curl` 下载后 `sha256sum` 与 `latest.json` 完全一致
+（`42db6a9bfbe18e053f354cbaac05e9f0294d5012bf5cb1281ceb2a8bdac2048f`），
+`adb install -r` 覆盖安装 `Success`，`aapt2 dump badging` 显示 `versionCode='2' versionName='0.2.0'`。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）
@@ -637,6 +675,8 @@ const DEV = resolveSerial(process.env.DEV_SERIAL);   // 参数 > DEV_SERIAL > �
 | `verify-no-sidebar-flash.cjs` | 注入去过渡样式后 reload 复测，验证侧栏修法有效 |
 | `probe-layer.cjs` | 把页面构造到 7 种层叠状态，逐一打印 `DSH_LOCATION_JS` 判出的层。**改判据前后都跑它**（§6.28） |
 | `verify-back-layers.cjs` | `node verify-back-layers.cjs <cdpPort>`，7 个场景各按一次真实返回键，断言「只退一层」。CDP 转发随 pid 重建、构造步骤带断言，是「返回是否互逆」的唯一判据 |
+| `publish-apk.cjs` | `node tools/publish-apk.cjs [--no-build] [--bump patch / minor / major]`，构建 release 并发布到 `dist/`（APK + `latest.json` + 自包含下载页） |
+| `serve-apk.cjs` | `node tools/serve-apk.cjs [port]`，把 `dist/` 发布成局域网下载页（默认 8123，支持 Range），另一台手机浏览器打开即可装机与收更新 |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 

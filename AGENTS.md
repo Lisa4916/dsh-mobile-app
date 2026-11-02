@@ -730,6 +730,18 @@ https://github.com/<owner>/<repo>/releases/latest/download/dsh-remote-latest.apk
      文件注释里还有一句 `-Pdsh.versionName=0.2.1`，不锚定就会把 tag 打成 `v0.2.1`
      （踩过，用 `DELETE /git/refs/tags/v0.2.1` 删掉重打）。
 
+   **第三个坑更隐蔽：上传的字节必须来自 git 对象，不是工作区。**
+   第一版用 `fs.readFileSync(工作区文件)` 上传，结果远端 `HEAD^{tree}` 与本地永远不同。
+   两个原因都在 Windows 默认行为里：
+   1. `core.autocrlf=true` —— 工作区是 CRLF，git 对象里是 LF，直接读工作区就多带了 `\r`。
+      必须 `git cat-file blob HEAD:<path>` 取对象字节。
+   2. **mode 不是恒为 `100644`** —— 本仓库 `gradlew` 是 `100755`，统一写 100644 会抹掉
+      可执行位，而 CI 里正好要 `./gradlew`。必须从 `git ls-tree -r HEAD` 照抄 mode。
+
+   **验收标准只有一个：`POST /git/trees` 返回的 sha 必须等于本地 `git rev-parse HEAD^{tree}`。**
+   `tools/push-via-api.mjs --all` 会打印这个对比，不一致就别当推成功了。
+   全量重推时不要带 `base_tree`，否则远端独有的旧文件会残留成幽灵文件。
+
    **发版前先探一句 `git ls-remote origin`**，不通就别指望 `publish-release.cjs` 能推上去。
    另一个反复出现的前提：本地 `git config http.proxy` 指着 `127.0.0.1:7890`，而 mihomo 不在时
    报 `Could not connect to server`；确认端口没人听就 `git config --local --unset http.proxy`

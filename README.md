@@ -428,24 +428,46 @@ node tools\publish-release.cjs --no-bump        # 打 tag 并推送
 | `publish-apk.cjs` | 构建 release 并发布到 `dist/`（APK + `latest.json` + 自包含下载页）；`--bump patch` 先把版本号 +1 |
 | `serve-apk.cjs` | 把 `dist/` 发布成局域网下载页（默认 8123），另一台手机浏览器打开即可装机与收更新 |
 | `publish-release.cjs` | `node tools/publish-release.cjs --bump patch` 升版本并提示提交；`--no-bump` 打 tag 并推送，触发 `release.yml` 建 GitHub Release |
+| `push-via-api.mjs` | 兜底：`github.com:443` 的 git 传输不通、但 `api.github.com` 正常时，用 Git Data API 把 HEAD 推上去。`--all` 全量重推（会按 git 对象字节与 mode 上传，远端树必须等于本地 `HEAD^{tree}`） |
+| `tag-only.mjs` | 兜底：远端 master 已就位、只缺 tag 时用它。取版本号的正则必须锚行首，否则抓到注释里的旧版本号 |
+| `ui-dump.cjs` | `node tools/ui-dump.cjs <ui.xml>`，把 `uiautomator dump` 的 XML 打成「文本 / 类 / bounds / 中心点」，找 adb 点击坐标的最快路径 |
 
 `_` 前缀的是早期一次性探针（`_probe-cur.cjs`、`_probe-page.cjs`、`_probe-storage.cjs`、`_tabs.cjs`、`_test-reset.cjs`），留作参考，不进主流程。
 
 CDP 转发要点：`cat /proc/net/unix | grep webview_devtools_remote` 会返回两条，必须选**不带 `browser_` 前缀**的那条。
 
+### `push-via-api.mjs` 为什么不能"只推改动的文件"
+
+它起初用 `git diff --name-only <base>..HEAD` 挑文件、只上传这些 blob。表面上没问题，
+实际推了两次都对不上：远端 `git rev-parse HEAD^{tree}` 与本地不同。
+
+两个原因，都是 Windows + git 的默认行为：
+
+1. **工作区是 CRLF，git 对象里是 LF**（`core.autocrlf=true`）。读工作区文件上传，
+   字节就多了 `\r`。修法：一律 `git cat-file blob HEAD:<path>` 取**对象里的字节**。
+2. **mode 不是恒为 100644**。这个仓库里 `gradlew` 是 `100755`，统一写 100644
+   会改掉可执行位 —— 而 CI 里恰好要 `./gradlew`。修法：从 `git ls-tree -r HEAD` 照抄 mode。
+
+所以现在默认全量（`--all`）重推并**打印 tree 对比**：一致才算推成功。
+`--all` 时不带 `base_tree`，否则远端独有的旧文件会残留成幽灵文件。
+
 ## 待办（下一档 B）
 
-- 体检剩余四项：删掉零使用的权限（`POST_NOTIFICATIONS` / `ACCESS_NETWORK_STATE`）与 9 条无用资源、
-  release 构建补齐（`proguard-rules.pro` 缺失 + 无签名）、长按删除加确认、收敛 39 处中文字面量与 8 处硬编码颜色
+已完成、不再列在这里的：局域网自动发现（第 22 步）、免 PIN 直进主界面（第 23 步）、
+release 签名与 GitHub Release 通道（第 21 步）、返回与进入严格互逆（第 19 步）。
+
+剩下的：
+
 - `androidTest` 覆盖仍不全：cookie 清除→重导航、键盘 insets、扫码链路只有手跑脚本
   （同域判定已在第 14 步补成 17 条 JVM 单测）
-- `MainActivity` 仍有 955 行：`buildUi()` 约 128 行代码造 UI（无 layout XML），可拆 `HomeView` / `WebPanel`
+- `MainActivity` 仍有 1000+ 行：`buildUi()` 里造 UI 的代码最长，可拆 `HomeView` / `WebPanel`
 - 隧道地址自动读回（quick tunnel 每次变，现在要手动重扫；走 dsh-pocket 的 `pocket.status` RPC）
 - 前台服务保活（现在靠 `svc power stayon true`，不该长期开）
 - 任务完成通知（DSH 的 SSE 完成事件）
 - 文件/拍照附件通道
-- 局域网自动发现（现在是扫固定二维码或填地址）
 - 多电脑快速切换（数据结构已支持，UI 已有列表，缺一键切）
+- 收敛 39 处中文字面量与 8 处硬编码颜色（lint `SetTextI18n` 还在报）
+- 长按删除已有确认框，但没有撤销（`Snackbar` 需要 material 的 coordinator 布局）
 
 ## 依赖现状
 

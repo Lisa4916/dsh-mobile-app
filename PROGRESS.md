@@ -1982,3 +1982,20 @@ POST /git/blobs（逐文件 base64）→ POST /git/trees（base_tree）
 手机 `ping 192.168.50.58` 100% 丢包。改成 `Set-NetConnectionProfile -InterfaceAlias "WLAN" -NetworkCategory Private`
 （需管理员）后立刻 `0% packet loss`、`nc -z 192.168.50.58 3081` 通。
 `Get-NetFirewallRule -DisplayName 'DSH Pocket*'` 至今为空 —— 通的是 Private 的默认放行，不是我们加的规则。
+
+#### 23.8 补记：走 API 推代码时远端树为什么对不上
+
+第一版 `push-via-api.mjs` 用 `git diff --name-only` 挑文件、再 `fs.readFileSync` 上传，
+推了两次，远端 `HEAD^{tree}` 都与本地不同（`8f960ce` 对 `7839a84`）。两个原因：
+
+| 原因 | 现象 | 修法 |
+|---|---|---|
+| `core.autocrlf=true` | 工作区 CRLF、对象 LF，上传字节多带 `\r` | `git cat-file blob HEAD:<path>` 取对象字节 |
+| mode 写死 100644 | `gradlew` 本来是 100755，可执行位被抹掉 | 从 `git ls-tree -r HEAD` 照抄 mode |
+
+**验收标准**：`POST /git/trees` 返回的 sha 必须等于本地 `git rev-parse HEAD^{tree}`。
+现在脚本会直接打印这个对比；全量重推（`--all`）时**不带 `base_tree`**，
+否则远端独有的旧文件会残留成幽灵文件。
+
+修完实测：`新 tree = 7d1e6e7b...（与本地树一致 ✅）`，远端 master `74fa61f`，
+CI 最后一个 run completed / **success**。

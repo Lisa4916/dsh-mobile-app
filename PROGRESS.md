@@ -31,6 +31,7 @@
 | 15 | 全网检索手机开发资料 + 知识库扩到 25 篇 | ✅ | base 内 16 → 25 篇；`passage` 全部 `ready`；`kb-verify` 全绿 |
 | 16 | 审计问题的 P0/P1 修复：release 通道打通、权限依赖清理、字号不再重建、删除加确认 | ✅ | release APK 1,976,330 B 签名有效且真机可用；`tests=135`；lint 29→20 |
 | 17 | 运行态全量功能回归（14 项主流程 + 3 项自愈/兜底） | ✅ | 全部符合设计；另修 2 处工具缺陷（硬编码序列号、依赖残留手势文件） |
+| 18 | 启动时侧栏不再闪：禁掉移动端 frame 侧栏首次就位的 transition | ✅ | 冷启动逐帧采样 `sideL >= -60` 帧数 1 → 0（两轮）；`tests=135`；lint 20 warning |
 
 **测试基线：JVM 单测全量 `tests=135 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
@@ -1290,3 +1291,122 @@ lint  0 error / 20 warning
 3. 飞行模式开关在 `cmd connectivity airplane-mode disable` 之后偶尔仍显示 `airplane_mode_on=1`，
    本轮就撞到一次（以为网络没恢复，实际是开关没生效）。脚本化时应把
    `ping` 结果作为判据，而不是命令退出码。
+
+---
+
+## 第 18 步：启动时侧栏不再闪 ✅
+
+用户反馈：「启动时侧面栏闪动一下」。这一条**不是我们代码引起的**，是被页面自己的 CSS 过渡放大出来的。
+
+### 18.1 先把它变成可观测的量
+
+没有测量手段就只能靠肉眼猜。`tools/record-back.cjs` 只能测「已连上 CDP 后触发返回」，
+而这个问题发生在 **CDP 连上之前**（WebView 刚创建、文档还没解析完）。
+
+新写 `tools/probe-startup.cjs`：`am force-stop` → `am start` → **边等边连 CDP**
+（从 `/proc/net/unix` 正则 `@?webview_devtools_remote_[0-9]+` 取 socket，去掉 `@`）
+→ 连上后按 40ms 一帧求值一整个 `SAMPLE_JS`。一次求值拿全部量（`t/tabs/hero/len/sideL/sideCls`），
+避免多次往返把帧间隔吃掉。
+
+判据：`sideL >= -60` 的帧数 > 0 且 `sideL < -60` 的帧数 > 0 → 判「闪」。
+
+第一版两个坑：
+- socket 名匹配用了 `split('\n').map(match)`，`webview_devtools_remote` 前面有 `@` 取不到 → 报「20 秒内没连上 CDP」；
+  改整段正则 + 打 `lastErr` 才定位到。
+- 采样完不 `process.exit(0)`，WebSocket 长连接让 Node 永不退出，看起来像「脚本卡死」→ 加了 `ws.socket.destroy()` + 显式退出。
+
+### 18.2 三次测量，把根因钉死
+
+`probe-startup.cjs`（修复前）：
+```
+[  3422ms] sideL=0    cls=mP3x-q_sidebarCol tabs=false hero=true len=33   ← 侧栏整个露在屏幕里
+[  3546ms] sideL=-191
+[  3657ms] sideL=-209
+侧栏闪动 = 是 ❌（sideL >= -60 的帧数 = 1）
+```
+
+`tools/probe-frame-attrs.cjs`（document-start 装 MutationObserver，看首帧属性）：
+```
+[  2516ms] first-seen            collapsed=true colRectL=0    tr=matrix(1,0,0,1,0,0)
+[  2945ms] attr:data-mobile-nav-explorer collapsed=true colRectL=-209 tr=matrix(1,0,0,1,-208.337,0)
+```
+**首帧 `data-sidebar-collapsed` 就已经是 `true`，但 `transform` 还是 0。**
+→ 矛盾点在这里：DOM 属性先到，样式后到。
+
+`tools/probe-sidebar-anim.cjs`（逐帧 + `getAnimations()`）：
+```
+[  3139ms] left=0    anims=[transform:running]
+[  3255ms] transitionrun prop=transform target=mP3x-q_sidebarCol
+[  3260ms] left=-13  … 一条 0.28s cubic-bezier(0.4,0,0.2,1) 的过渡
+[  3463ms] left=-209  anims=[]
+```
+**结论：是一次真正的 CSS transition，不是页面 JS 慢一步直接跳。**
+
+### 18.3 为什么不能改 `DSH_GO_HOME_JS`
+
+`MainActivity.kt` 里只有**按返回键**才调它（`installBackHandling()`），启动路径根本不调。
+而且它入口有 `if (reachedHome()) { … return; }` 保护。去改它只会把返回键弄坏，
+对启动闪动一点作用都没有 —— 这条差点被当成「顺手一起修」的错方向。
+
+### 18.4 修法
+
+在 `WebViewFactory.kt` 加 `NO_SIDEBAR_FLASH_JS`，走 **document-start** 注入（和 `POLYFILL_JS` 同一条链）：
+
+```css
+[data-mobile-nav="frame"] [class*="_sidebarCol"],
+[data-mobile-nav="frame"] [class*="_rightbarCol"] {
+  transition: none !important;
+  animation: none !important;
+}
+```
+
+三条设计约束：
+1. **只禁 transition，不写死 transform** —— 位置该由页面决定，我们只让它「不带动画地就位」。
+   以后页面改侧栏宽度、用户手动展开，行为都不受影响。
+2. **选择器用 `[class*="_sidebarCol"]` 而不是完整类名** —— 实测类名是 `mP3x-q_sidebarCol`，
+   前缀随 DSH 构建变化，后缀是稳定的语义命名。
+3. **必须 document-start** —— 实测过渡 3139ms 起、3463ms 结束，晚一步就完全错过。
+
+### 18.5 验证
+
+`tools/verify-no-sidebar-flash.cjs`（先注入样式再 reload，看侧栏还会不会进屏）：
+```
+[  2092ms] sideL=-209 hero=true  css=ok|true     ← 一出现就是收起态
+sideL >= -60 的帧数 = 0 ；侧栏闪动 = 否 ✅
+```
+（这一版也踩了个坑：首版 `(document.head || document.documentElement).appendChild` 在 document-start
+时两者都是 null 直接抛错，后面的监听器没注册上 → `css=false`，测出来是「没注入」而不是「注入了没用」。
+改成 `head || documentElement || getElementsByTagName('html')[0]` 三级回落 + `setInterval` 重试。）
+
+装新包后 `probe-startup.cjs` 连跑两轮：
+```
+第 1 轮：sideL >= -60 帧数 = 0，sideL < -60 帧数 = 169 → 否 ✅
+第 2 轮：sideL >= -60 帧数 = 0，sideL < -60 帧数 = 136 → 否 ✅
+[  3347ms] sideL=-209 cls=mP3x-q_sidebarCol hero=true   ← 一出现即 -209，中间没有任何帧
+```
+
+### 18.6 回归（确认没把别的弄坏）
+
+| 项 | 结果 |
+|---|---|
+| 侧栏手动展开 | `probe-sessions.cjs 9222 open` → `sidebar {"l":0,"w":280}`，会话条目完整列出 9 条 |
+| 进入会话页 | 点第 4 条会话 → `title=网络管理器代理模式优化 — DeepSeek Harness`，`tabs=true` |
+| 会话页按返回 | 返回键回首页 → `{"sideL":-209,"hero":true,"tabs":false}`，`Document 请求: 无（页面未重载）` |
+| 首页按返回 | 退到桌面 |
+| 单测 | **135 / 0 failures**（10 个类，与第 17 步一致） |
+| lint | 20 条 warning / **0 error**（与第 16 步一致，无新增） |
+
+### 18.7 装的坑（第二次撞）
+
+装完 APK `am start` 又落到 `ResolverActivity` —— `pm list users` 仍显示 900/901 两个应用分身。
+`adb install -r` 默认对**所有用户**安装，清完分身再装一次就全回来。
+本轮又 `pm uninstall --user 900/901` 一次。**根治办法是装包时就用 `adb shell pm install -r --user 0 <apk>`**（已写进 AGENTS §6.24）。
+
+### 18.8 新增工具
+
+| 脚本 | 用途 |
+|---|---|
+| `tools/probe-startup.cjs` | 冷启动逐帧采样侧栏位置，判「启动时闪不闪」 |
+| `tools/probe-frame-attrs.cjs` | document-start 装观察器，抓首帧 `data-sidebar-collapsed` 与侧栏几何 |
+| `tools/probe-sidebar-anim.cjs` | 逐帧记 `getAnimations()` + `transitionrun` 事件，区分「CSS 过渡」与「JS 直接跳」 |
+| `tools/verify-no-sidebar-flash.cjs` | 注入去过渡样式后复测，验证修法有效 |

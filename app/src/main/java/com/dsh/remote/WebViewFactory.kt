@@ -263,6 +263,10 @@ object WebViewFactory {
             // 新 API 缺失补丁必须也是 document-start：DSH 前端模块在初始化时就会调用
             // Promise.withResolvers，晚一步注入等于没注入（页面已经抛异常停在那儿了）。
             WebViewCompat.addDocumentStartJavaScript(wv, POLYFILL_JS, setOf("*"))
+            // 侧栏「启动时滑一下」必须在 document-start 就压住：等 onPageFinished 再注入，
+            // 那段 280ms 的过渡早就演完了（实测 3139ms 起、3463ms 结束，而页面 load 事件 2245ms
+            // 之后还要等 hydration 才动侧栏 —— 晚一步就完全错过）。
+            WebViewCompat.addDocumentStartJavaScript(wv, NO_SIDEBAR_FLASH_JS, setOf("*"))
         }
     }
 
@@ -571,6 +575,53 @@ object WebViewFactory {
      * 这样「每次打开软件进主界面」成立，同时用户点进某个会话后按返回、
      * 或者页面自己重载，都不会被踢回主界面。
      */
+    /**
+     * 启动时不许侧栏「滑一下」。
+     *
+     * 现象（真机 ZY22GHMK5F 实测，tools/probe-startup.cjs + tools/probe-sidebar-anim.cjs）：
+     * 冷启动约 3.1 秒时，移动端 frame 的侧栏列从 `left=0`（整个露在屏幕里）用一条
+     * `transform 0.28s cubic-bezier(0.4,0,0.2,1)` 收到 `-209`。那 280ms 就是用户看到的「闪一下」。
+     *
+     * 根因不在我们的代码：`data-sidebar-collapsed=true` 在首帧就已经在 DOM 上了
+     * （tools/probe-frame-attrs.cjs 抓到 `first-seen` 时 collapsed 已经是 true），
+     * 但页面要等 hydration 之后才把 `transform: matrix(...,-208.337,0)` 写上去。
+     * DOM 属性先到、样式后到，中间这段就是「展开了又收回去」。
+     *
+     * 为什么不能改 `DSH_GO_HOME_JS`：启动路径根本不调它（只有按返回键才调），
+     * 而且它的入口有 `reachedHome()` 保护。改它只会把返回键弄坏。
+     *
+     * 为什么只禁 transition、不直接写死 transform：位置该由页面决定，我们只让它「不带动画地就位」。
+     * 这样页面以后把侧栏宽度改了、或者用户手动展开，行为都不受影响；
+     * 禁掉的仅仅是「第一次就位时的那段过渡」。
+     *
+     * 选择器用 `[class*="_sidebarCol"]` 而不是完整类名：实测类名是 `mP3x-q_sidebarCol`，
+     * 前缀会随 DSH 构建变化，后缀是稳定的语义命名。
+     */
+    private const val NO_SIDEBAR_FLASH_JS = """
+        (function(){
+          function mark(){
+            try {
+              if (document.getElementById('__dshNoSidebarFlash')) return true;
+              var parent = document.head || document.documentElement ||
+                           document.getElementsByTagName('html')[0];
+              if (!parent) return false;
+              var st = document.createElement('style');
+              st.id = '__dshNoSidebarFlash';
+              st.textContent =
+                '[data-mobile-nav="frame"] [class*="_sidebarCol"],' +
+                '[data-mobile-nav="frame"] [class*="_rightbarCol"] {' +
+                'transition:none !important;animation:none !important}';
+              parent.appendChild(st);
+              return true;
+            } catch (e) { return false; }
+          }
+          if (!mark()) {
+            var timer = setInterval(function(){ if (mark()) clearInterval(timer); }, 4);
+            document.addEventListener('DOMContentLoaded', mark, { once: true });
+          }
+        })();
+    """
+
     private const val HOME_RESET_JS = """
         (function(){
           try {

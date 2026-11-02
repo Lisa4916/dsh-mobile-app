@@ -98,7 +98,7 @@ dsh.lanPin=<token-lan 的内容>
 | 7c | 真机无线调试接入 | ❌ 放弃（配对成功但恒 offline，改走 USB） |
 | 7d | 真机 USB 接入 + 第 7b 步真机复验 | ✅ |
 | 7e | 公网隧道开启 + 真机 4G 验证 + ASK_USER 分支实测 | ✅ |
-| 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness`；三次强化后共 **25 篇**（含平台版本节奏、Android 16 迁移、WebView 安全基线、渲染进程兜底、R8/发布、测试分层、架构分层、敏感数据、性能验证） | ✅ 见 §8 |
+| 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness`；三次强化后共 **26 篇**（含平台版本节奏、Android 16 迁移、WebView 安全基线、渲染进程兜底、R8/发布、测试分层、架构分层、敏感数据、性能验证、启动阶段 CSS 过渡闪屏） | ✅ 见 §8 |
 | 11 | 体检出的四个问题：同域判定 / 状态栏前景 / 文案 / 渲染进程兜底 | ✅ 见 §6.21–§6.23 |
 | 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
 | 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
@@ -147,7 +147,8 @@ app/src/main/java/com/dsh/remote/
 ├── WebViewFactory.kt    WebView 配置的唯一出口
 │                        create(host)：JS 开关、DOM Storage、同域跳转拦截、错误回调、
 │                        背景色 0xFF151517、installHomeResetOnStart()、注入 KEYBOARD_HOOK_JS
-│                        HOME_RESET_JS / KEYBOARD_HOOK_JS 两个常量
+│                        HOME_RESET_JS / KEYBOARD_HOOK_JS / NO_SIDEBAR_FLASH_JS 等常量
+│                        NO_SIDEBAR_FLASH_JS：禁掉侧栏首次就位的 transition（§6.27）
 ├── WebBridge.kt         @JavascriptInterface，注入名 "dshNative"
 ├── HostMatch.kt         「算不算同一个站」的唯一判据（纯 JVM，只用 java.net.URI）
 │                        isSameHost(target, allowedHost)：完全相等 或 host.endsWith(".allowed")
@@ -534,6 +535,36 @@ const DEV = resolveSerial(process.env.DEV_SERIAL);   // 参数 > DEV_SERIAL > �
 推广到所有验证脚本：**先断言「这次跑的前提成立」，再断言「结果对不对」**。
 前提不成立时给非零退出码，让人一眼看出是没匹配上而不是失败。
 
+### 6.27 启动时侧栏闪一下 = 页面的 CSS 过渡，不是我们的代码
+
+现象：冷启动约 3.1 秒，移动端 frame 的侧栏列从 `left=0`（整个露在屏幕里）
+用一条 `transform 0.28s cubic-bezier(0.4,0,0.2,1)` 收到 `-209`。那 280ms 就是「闪一下」。
+
+根因：`data-sidebar-collapsed="true"` 在**首帧就已经在 DOM 上**，但页面要等 hydration
+之后才把 `transform: matrix(…,-208.337,0)` 写上去。**DOM 属性先到、样式后到**，中间这段就是「展开了又收回去」。
+
+修法（`WebViewFactory.kt` 的 `NO_SIDEBAR_FLASH_JS`，走 document-start）：
+```css
+[data-mobile-nav="frame"] [class*="_sidebarCol"],
+[data-mobile-nav="frame"] [class*="_rightbarCol"] { transition:none !important; animation:none !important }
+```
+
+四条铁律：
+
+1. **别去改 `DSH_GO_HOME_JS`** —— 启动路径根本不调它（只有按返回键才调），
+   而且它入口有 `reachedHome()` 保护。改它只会把返回键弄坏，对启动闪动毫无作用。
+2. **只禁 transition，不写死 transform** —— 位置该由页面决定，我们只让它「不带动画地就位」。
+   页面以后改侧栏宽度、用户手动展开都不受影响。
+3. **选择器不许写死完整类名** —— 实测是 `mP3x-q_sidebarCol`，`mP3x-q_` 前缀随 DSH 构建变化，
+   `_sidebarCol` 后缀是稳定语义命名。要写 `[class*="_sidebarCol"]`。
+4. **必须 document-start** —— 过渡 3139ms 起、3463ms 结束，`onPageFinished` 再注入完全错过。
+   另外 document-start 时 `document.documentElement` 可能是 `null`，
+   取父节点要三级回落 `head || documentElement || getElementsByTagName('html')[0]`，
+   否则 `appendChild` 抛错会让后面的监听器全部注册不上，表现为「注入了但没生效」。
+
+验证：`node tools/probe-startup.cjs 9222 14000 40`，判据是 `sideL >= -60` 的帧数为 0。
+修复前 1 帧，修复后连跑两轮都是 0。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）
@@ -563,6 +594,11 @@ const DEV = resolveSerial(process.env.DEV_SERIAL);   // 参数 > DEV_SERIAL > �
 | `probe-back-nav.cjs` | `node probe-back-nav.cjs <cdpPort> [--state\|--back]`，打印页面位置/侧栏几何，`--back` 触发返回并逐帧采样 + 抓 Document 事件 |
 | `record-back.cjs` | `node record-back.cjs <cdpPort> [帧数] [间隔ms] [目录]`，触发返回 + CDP 连拍 + DOM 采样，能抓到 1 秒内的中间态。**验证返回动效是否闪屏就看它**（§6.20） |
 | `crash-page.cjs` | `node crash-page.cjs <cdpPort>`，用 CDP `Page.crash` 让渲染进程真的崩掉，验证 `onRenderProcessGone` 兜底（§6.22）。非 root 的 `pkill` 杀不掉沙箱进程，只能靠它 |
+| probe-startup.cjs | 
+ode probe-startup.cjs <cdpPort> <毫秒> <间隔ms>，冷启动逐帧采样侧栏位置，判「启动时闪不闪」（§6.27）。**它能在 CDP 连上之前的时间窗里靠边等边连抢到采样点** |
+| probe-frame-attrs.cjs | document-start 装 MutationObserver，抓首帧 data-sidebar-collapsed 与侧栏 	ransform，用来证明「属性先到、样式后到」 |
+| probe-sidebar-anim.cjs | 逐帧记 getAnimations() + 	ransitionrun 事件，区分「CSS 过渡」与「JS 直接跳」（修法完全不同，不能靠猜） |
+| erify-no-sidebar-flash.cjs | 注入去过渡样式后 reload 复测，验证侧栏修法有效 |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 

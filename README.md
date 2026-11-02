@@ -164,6 +164,7 @@ App 的处理（`RecoveryPlanner` + `HandshakeHealGate`）：
 10. **`themes.xml` 里的 `windowLightStatusBar` 只在启动那一刻生效。** edge-to-edge 下状态栏底下就是页面本身，页面是深色（实测状态栏区域亮度 `p50=21`）而图标也是深色，时间电量直接看不见。进出页面要各调一次 `applyBarIconTheme`。
 11. **不覆盖 `onRenderProcessGone` 的话，渲染进程被回收会把整个 App 带走。** 而渲染进程被清在这台机器上是常态（logcat：`ProcessSceneCleaner: SwipeUpClean: kill procName=…:sandboxed_process0`）。死掉的 WebView 不能复用，`loadUrl` 静默不生效，只能销毁重建。非 root 杀不掉沙箱进程，验证要用 CDP 的 `Page.crash`（`tools/crash-page.cjs`）。
 12. **应用分身里也会装同名包。** 桌面上出现 3 个同名图标、点图标弹「选择要使用的应用程序」时，先 `pm list users` 查 900/901 分身用户，再 `pm uninstall --user N <pkg>`。别先怀疑 `am start` 的写法。
+13. **启动时侧栏闪一下，是页面的 CSS 过渡，不是我们的代码。** `data-sidebar-collapsed="true"` 首帧就在 DOM 上，但 `transform` 要等 hydration 之后才写上去，中间那 280ms 就是「展开了又收回去」。修法是 document-start 注入一条 `transition:none`，**只禁过渡、不写死位置**。别去改 `DSH_GO_HOME_JS` —— 启动路径根本不调它（只有按返回键才调），改它只会把返回键弄坏。详见 `AGENTS.md` §6.27。
 
 ## 构建
 
@@ -227,6 +228,10 @@ $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
 | `probe-sidebar.cjs` | 列出按钮几何与 `aria-label`，页面改版后重新定位选择器 |
 | `record-back.cjs` | 触发返回 + CDP 连拍 + DOM 采样，抓 1 秒内中间态；**验证返回动效是否闪屏就看它** |
 | `crash-page.cjs` | 用 CDP `Page.crash` 让渲染进程真崩，验证 `onRenderProcessGone` 兜底（非 root 的 `pkill` 杀不掉沙箱进程） |
+| `probe-startup.cjs` | 冷启动逐帧采样侧栏位置，判「启动时闪不闪」。能在 CDP 连上之前的时间窗里靠边等边连抢到采样点 |
+| `probe-frame-attrs.cjs` | document-start 装 MutationObserver，抓首帧 `data-sidebar-collapsed` 与侧栏 `transform`，证明「属性先到、样式后到」 |
+| `probe-sidebar-anim.cjs` | 逐帧记 `getAnimations()` + `transitionrun`，区分「CSS 过渡」与「JS 直接跳」（修法完全不同） |
+| `verify-no-sidebar-flash.cjs` | 注入去过渡样式后 reload 复测，验证侧栏修法有效 |
 
 `_` 前缀的是早期一次性探针（`_probe-cur.cjs`、`_probe-page.cjs`、`_probe-storage.cjs`、`_tabs.cjs`、`_test-reset.cjs`），留作参考，不进主流程。
 

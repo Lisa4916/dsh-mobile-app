@@ -4,6 +4,10 @@
 
 ## 现状
 
+**v0.3 起（第 22 步）：装完不必先扫码。** 全新安装且手机里没有任何连接档案时，
+App 会自己在同一 Wi-Fi 的 /24 里扫一遍（254 个地址并发、约 2 秒）找电脑；
+扫到就只需要输一次 8 位 PIN，扫不到才回落到扫码或手输。
+
 **局域网与公网都已在真机跑通。** 手机屏幕上就是电脑上正在进行的同一段对话，
 含流式输出、工具卡片、子智能体状态。公网走 Cloudflare quick tunnel，关掉 Wi-Fi 走 4G 也能进主界面。
 
@@ -48,6 +52,8 @@ dsh-pocket 反向代理（认证 + cookie + 注入 launch token）
 | `ConnectionRepository.kt` | 69 | 档案读写接口 + `AutoConnect.decide()` 三态（Connect / Seed / ShowList） |
 | `BootstrapUrl.kt` | 68 | 内置地址拼接（host + PIN → 完整 URL），不硬编码任何真实地址 |
 | `HostMatch.kt` | 63 | 「算不算同一个站」的唯一判据：host 精确比对 + 点子域边界，`mailto:`/`tel:` 不丢浏览器 |
+| `LanDiscovery.kt` | 251 | 局域网自动发现：`LanScan`（纯 JVM，候选地址/判据/搬 PIN）+ `LanDiscovery`（48 并发扫 254 个地址，约 2 秒） |
+| `LanAdopt.kt` | 62 | 扫到之后怎么办的纯决策：`Adopt` / `AskPin` / `None`，**多台电脑答话时绝不搬 PIN** |
 | `CookieNames.kt` | 39 | 「删哪类 cookie」的唯一判据（`dsh-auth-*` vs `dsh_pocket_token`） |
 | `WebBridge.kt` | 28 | `@JavascriptInterface` 桥：`keyboardHeight()`（CSS px）、`isNativeShell()` |
 
@@ -74,7 +80,9 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'; $env:ANDROID_HOME='D:\AndroidDev\sdk'; $en
 | `HandshakeHealGateTest` | 10 | 节流与退避 |
 | `HostMatchTest` | 17 | 判同域 + **6 条反面用例**（host 在 query / fragment / 子域后缀 / 路径段 / 相似域名一律判外链） |
 | `AutoConnectTest` | 7 | lastUsed 优先、无地址宁可停在列表、seed 的 kind 由 URL 推断 |
-| **合计** | **135** | |
+| `LanDiscoveryTest` | 23 | 候选地址（钉 /24、排除自己与保留段）、判据不依赖响应长度、`tokenOf` 不认 fragment、`rebind` 保 scheme 与端口 |
+| `LanAdoptTest` | 11 | 同主机直连 / 单台搬 PIN / **多台一律 AskPin** / 无 PIN 不让连 / 去重 |
+| **合计** | **176** | |
 
 **真机 instrumented**：`androidTest/PageProbeJsTest` 7 条，验取值链路在真 WebView 里的行为
 （中文标题含 `·` 往返、`innerText` 跳过 `display:none`、`about:blank` 不崩）。
@@ -86,7 +94,34 @@ adb shell am instrument -w -r -e class com.dsh.remote.PageProbeJsTest \\
 ```
 
 CI 见 `.github/workflows/ci.yml`：`assembleDebug` + `testDebugUnitTest`（`--rerun-tasks`）+ `lintDebug`。
-lint 当前基线 **0 error / 20 warning**（warnings 不挡合并）。
+lint 当前基线 **0 error / 22 warning**（warnings 不挡合并）。
+
+## 装完就能连：自动找电脑
+
+装机后的第一体验以前是「请扫码或手输地址」。现在多了一步自动发现：
+
+| 顺序 | 依据 | 用户要做什么 |
+|---|---|---|
+| 1 | 手机里最后使用过的连接 | 什么也不用做 |
+| 2 | 构建时注入的 `dsh.lanUrl`/`dsh.lanPin`（只在本机自编译时存在） | 什么也不用做 |
+| 3 | **扫同一 Wi-Fi 的 /24 找 dsh-pocket** | 扫到就输一次 8 位 PIN（或直接进） |
+| 4 | 都不行 → 扫码 / 手输 | 去电脑前扫二维码 |
+
+为什么第 3 步之后还要 PIN：dsh-pocket 的 PIN 是**进程级**的一把钥匙
+（`~/.dsh/dsh-pocket/token-lan`），未认证时没有任何接口能读到它，
+服务端也没有 mDNS/SSDP 之类的发现服务（`lib` 下 js 里零命中）。
+所以扫描能解决「电脑在哪」，解决不了「PIN 是多少」—— 但把「跑到电脑前扫屏」
+压缩成了「手输 8 位数字」。
+
+几条实现上的死规矩（都有单测钉着）：
+
+- **钉死 /24**，不按真实掩码展开：/16 是 65,534 个地址，手机上跑不完。
+- **判据只能看正文**（含 `DSH Pocket` / `DeepSeek Harness`），
+  **不能看响应长度** —— 同一个验证页实测出现过 4210 B 与 3969 B 两种长度。
+- **多台电脑答话时不搬 PIN**：手机侧分不清是哪台，搬过去有可能连到别人家机器上。
+  只有「唯一一台答话」且「有带 PIN 的旧档案」时才把 PIN 搬到新 IP。
+- **走流量时不扫**：只在 `wlan/ap/eth/rndis` 这类接口上取本机地址，
+  扫运营商 NAT 段白等两秒，一台电脑都不会有。
 
 ## 内置地址怎么配（不再硬编码）
 
@@ -168,6 +203,7 @@ App 的处理（`RecoveryPlanner` + `HandshakeHealGate`）：
 12. **应用分身里也会装同名包。** 桌面上出现 3 个同名图标、点图标弹「选择要使用的应用程序」时，先 `pm list users` 查 900/901 分身用户，再 `pm uninstall --user N <pkg>`。别先怀疑 `am start` 的写法。
 13. **启动时侧栏闪一下，是页面的 CSS 过渡，不是我们的代码。** `data-sidebar-collapsed="true"` 首帧就在 DOM 上，但 `transform` 要等 hydration 之后才写上去，中间那 280ms 就是「展开了又收回去」。修法是 document-start 注入一条 `transition:none`，**只禁过渡、不写死位置**。别去改 `DSH_GO_HOME_JS` —— 启动路径根本不调它（只有按返回键才调），改它只会把返回键弄坏。详见 `AGENTS.md` §6.27。
 14. **返回键要「一次只退一层」，页面其实有七层。** 旧版只认 `session / home / other` 三档，于是「首页 + 侧栏展开」按返回**直接退出 App**（多退了一步），而「会话知识库面板开着」会把手底下的会话页拉回首页（又少退了一层）。现在按 `panel → overlay → sidebar → session → feature → home` 判，每层只对应一个动作。两个坑：会话页也有 `aria-selected="true"`，所以 `session` 判据必须排在 `feature` 前面；`Escape` 对面板和会话页完全无效（实测 `layerN 0→2→2`），只有抽屉和菜单认它。详见 `AGENTS.md` §6.28。
+15. **「装完就能连」不能靠服务发现。** dsh-pocket 服务端 `lib` 下所有 js 里 `mdns|bonjour|discovery|broadcast|multicast|ssdp` **零命中**，它既不广播也不响应发现，手机侧只能自己扫 /24。三条实测结论：① 254 个地址、并发 48、TCP 超时 300ms，**1.86 秒**扫完；② **不能拿响应长度当指纹** —— 同一个「访问验证」页实测出现过 4210 B 与 3969 B 两种长度，判据只能是正文含 `DSH Pocket`；③ PIN 是 dsh-pocket **进程级**的钥匙（`~/.dsh/dsh-pocket/token-lan`），未认证时读不到，所以扫描能解决「电脑在哪」但解决不了「PIN 是多少」。详见 `AGENTS.md` §6.31。
 
 ## 构建
 
@@ -321,11 +357,11 @@ node tools\publish-release.cjs --no-bump        # 打 tag 并推送
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | `tests=142 failures=0 errors=0 skipped=0`（10 个测试类） |
-| APK | `app-debug.apk` 7,296,484 B / `app-release.apk` 1,976,330 B |
+| 单元测试 | `tests=176 failures=0 errors=0 skipped=0`（12 个测试类） |
+| APK | `app-debug.apk` 7,365,924 B / `app-release.apk` 1,976,330 B |
 | 返回互逆 | `tools/verify-back-layers.cjs` 7 场景全过（面板 / 菜单 / 抽屉 / 会话 / 功能视图 / 首页各按一次只退一层） |
 | 真机 instrumented | `PageProbeJsTest` 7 条 `OK (7 tests)`（`8PCE7LJB99VG7TRO`，Android 15） |
-| lint | 0 error / 20 warning |
+| lint | 0 error / 22 warning |
 | 局域网 | 扫码/手输后进入 DSH 主界面 |
 | 公网 4G | 关 Wi-Fi 走 4G，Redmi `8PCE7LJB99VG7TRO` 一次通过（证据图 `docs/evidence/step7-public-4g.png`） |
 | PIN 页自愈 | CDP 抓到 `?token=…&dsh-pocket-retry=1` 重连跳 + cookie 重新下发 |

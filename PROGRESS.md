@@ -35,14 +35,15 @@
 | 19 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ | 真机 7 种层叠状态全通过（`tools/verify-back-layers.cjs`）；`tests=142`；lint 0/20 |
 | 20 | 第二台手机装机与收更新：版本号单一来源 + 局域网分发页 | ✅ | 手机侧 curl 下载 1,930,818 B，SHA-256 与清单一致；`adb install -r Success |
 | 21 | GitHub Release 发版：专用签名密钥 + tag 触发构建 | ✅ | Release `v0.2.0` 已发布；`releases/latest/download/dsh-remote-latest.apk` 实测 302→200、1,930,818 B，SHA-256 与 `SHA256SUMS.txt` 一致 |
+| 22 | 装完就能连：自动扫局域网找电脑，扫到只差 PIN | ✅ | 254 地址并发扫完 1.86 s 命中本机；单测 142 → 176；lint 0 error / 22 warning；真机待验（无在线设备） |
 
-**测试基线：JVM 单测全量 `tests=142 failures=0 errors=0 skipped=0`**
+**测试基线：JVM 单测全量 `tests=176 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
-`EndpointTest` 24 + `HandshakeHealGateTest` 10 + `HostMatchTest` 17 + `PageProbeTest` 20 +
-`RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
+`EndpointTest` 24 + `HandshakeHealGateTest` 10 + `HostMatchTest` 17 + `LanAdoptTest` 11 +
+`LanDiscoveryTest` 23 + `PageProbeTest` 20 + `RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
 **真机 instrumented：`PageProbeJsTest` 7 条 `OK (7 tests)`**（Redmi `8PCE7LJB99VG7TRO`，Android 15）
-**APK：`app-debug.apk` 7,296,484 B / `app-release.apk` 1,976,330 B**（versionName 0.1.0，versionCode 1）
-**lint：0 error / 20 warning**
+**APK：`app-debug.apk` 7,365,924 B / `app-release.apk` 1,976,330 B**（versionName 0.1.0，versionCode 1）
+**lint：0 error / 22 warning**
 
 ---
 
@@ -1695,3 +1696,153 @@ Error: The process '.../sdkmanager' failed with exit code 1
 > `git push origin refs/tags/...` 发版的。下次发版前先探一句
 > `git ls-remote origin`，不通就走 API 或先修好代理规则（把 `github.com` 加进直连/正确节点）。
 
+## 第 22 步：装完就能连，不必先扫码或手输 ✅
+
+用户：「软件下载后需要手动连接或者扫码连接」—— 这是从 GitHub Release 装完 App 的第一体验，
+必须先去电脑前扫二维码，或者在手机上敲一整个 `http://192.168.x.x:3081/?token=xxxxxxxx`。
+
+### 22.1 根因不是「忘了做自动连接」，而是自动连接没有可用的东西
+
+`autoconnect()` 本来就有三级判断（`AutoConnect.decide`）：
+
+| 顺序 | 依据 | CI 包里的实际情况 |
+|---|---|---|
+| 1 | 手机里最后使用过的连接 | 全新安装 → 没有 |
+| 2 | 构建时注入的 `BuildConfig.DEFAULT_LAN_URL` | **空串**（见下） |
+| 3 | 落到连接列表，走「扫码 / 手输」 | ← 用户看到的就是这一步 |
+
+第 2 条为空是**故意的**：`.github/workflows/release.yml` 不传 `dsh.lanUrl`/`dsh.lanPin`，
+因为内置一个写死的 `?token=` 等于把 dsh-pocket 的局域网 PIN 公开在仓库里，
+写死的 IP 也会在换网段后变成一个连不上的地址。
+
+于是三级全落空。缺的不是「自动连接代码」，而是**「手机怎么知道电脑在哪」**这一层信息。
+
+### 22.2 为什么不能靠服务发现
+
+查了 dsh-pocket 服务端（`~/.dsh/profiles/desktop/node_modules/dsh-pocket`，v2.12.0）：
+`lib` 下所有 js 文件里 `mdns|bonjour|discovery|broadcast|multicast|ssdp` **零命中** ——
+它既不广播自己，也不响应发现请求。手机侧没有现成的服务发现可用。
+
+所以只剩一条路：**自己扫一遍 /24**。
+
+### 22.3 扫描可行性实测（本机真跑，不是估算）
+
+一次性原型 `tools/_probe-lan-scan.cjs`（用完已删）：
+
+```
+候选 254 个地址（来自 192.168.50.58/24）截断=false
+TCP 3081 存活：1 个，耗时 1857ms -> 192.168.50.58
+总耗时 1871ms
+```
+
+参数：并发 48、TCP 连接超时 300ms、HTTP 读超时 800ms。
+**254 个地址全扫完 1.86 秒**，命中唯一一台电脑。
+
+两个关键取舍：
+
+- **钉死 /24，不按真实掩码展开。** 家里若是 /16，展开是 65,534 个地址，
+  手机上跑不完也没意义。
+- **不能拿响应长度当指纹。** 同一个「访问验证」页实测出现过 4210 B 与 3969 B 两种长度
+  （页面里带着动态内容）。判据只能是正文含 `DSH Pocket` 或 `DeepSeek Harness`。
+
+### 22.4 扫到之后还差 PIN —— 这一层要说清楚
+
+dsh-pocket 的 PIN 是**进程级的一把钥匙**（`~/.dsh/dsh-pocket/token-lan`），
+没有任何接口能在未认证时读到它。实测四种请求的差异：
+
+| 请求 | 状态 | `Set-Cookie` | 标题 |
+|---|---|---|---|
+| 无 token | 200 | 无 | DSH Pocket · 访问验证 |
+| `?token=60111186`（局域网 PIN） | 200 | `dsh-auth-*` + `dsh_pocket_token` | 正在进入 |
+| `?token=00000000`（错 PIN） | 200 | 无 | 访问验证 |
+| `?token=75330002`（公网 PIN） | 200 | 无 | 访问验证 |
+
+→ 判据是「有没有下发 `Set-Cookie`」；公网 PIN 在局域网端口上无效（两把不同的钥匙）。
+→ 所以扫描能解决「电脑在哪」，解决不了「PIN 是多少」。这一步必须由用户提供，
+  但可以把它从「跑到电脑前扫二维码」压缩成「输 8 位数字」。
+
+### 22.5 落地
+
+新增 **`app/src/main/java/com/dsh/remote/LanDiscovery.kt`**：
+
+- `LanScan`（纯 JVM，可单测）：`candidates()` / `looksLikePocket()` / `tokenOf()` /
+  `rebind()` / `schemeOf()` / `portOf()` / `localIpv4()` / `isWifiLikeInterface()` / `localLanIpv4()`。
+- `LanDiscovery`（Android 侧）：线程池 48 并发、`HTTP/1.0` + `Connection: close`、
+  命中即返回（不必读完）、`cancel()` 可随时停手。
+
+新增 **`app/src/main/java/com/dsh/remote/LanAdopt.kt`**：扫到之后怎么办的纯决策。
+
+| 情形 | 结局 | 理由 |
+|---|---|---|
+| 扫到的主机 == 已保存档案的主机 | `Adopt`（直接连） | 本来就认识这台电脑 |
+| **只有一台**电脑答话，且有带 PIN 的档案 | `Adopt`（`rebind` 搬 PIN 到新 IP） | PIN 是进程级的，不随 IP 变；电脑换了 DHCP 地址仍有效 |
+| 多台电脑答话 | `AskPin` | 手机侧分不清是哪台，搬 PIN 有可能连到别人家机器上 —— 宁可让用户输一次 |
+| 扫到但没有任何带 PIN 的档案 | `AskPin` | 打开它自己的验证页／亮出 PIN 输入框 |
+| 一台都没扫到 | `None` | 落回列表 + 手输/扫码 |
+
+几条硬约束（都是踩过才知道的）：
+
+- `tokenOf` **必须先砍 fragment 再找 `?`**：`http://h/#?token=x` 里的 token 是 fragment 的，
+  服务端收不到；反过来先找 `?` 就会把它当成有效凭据。
+- `rebind` **必须带上原 scheme**：`BootstrapUrl.build` 见到没有 scheme 的输入会补 `http://`，
+  于是 `https://` 的档案迁移后会**悄悄降级成明文** —— 用户不会察觉，但 cookie 就开始裸奔了。
+  单测 `rebind_preservesHttpsScheme` 就是钉这个。
+- `connectWithPin` **必须带端口**：`BootstrapUrl.build` 只补 scheme 不补端口，
+  传裸主机名会拼成 `http://<ip>/?token=…`（80 端口），连不上 3081。
+- 扫描汇总要放**独立线程**等 `CountDownLatch`，不能提到同一个线程池：池满时永远轮不到，
+  表现是「扫完了但一直不回调」。
+- 走流量时**不扫**：`localLanIpv4()` 只认 `wlan/ap/swlan/eth/rndis/usb` 前缀的接口。
+  扫运营商 NAT 网段白等 2 秒，一台电脑都不会有。
+  不用 `ConnectivityManager`，那要 `ACCESS_NETWORK_STATE` 权限（本项目已删）。
+
+`MainActivity` 侧的改动：
+
+- `autoconnect()` 的第三级从「直接落到列表」改成「落到列表 **并起一次扫描**」。
+- 列表页新增 `foundBox`（默认 GONE）：扫到电脑但没有 PIN 时亮出来，显示主机名 +
+  「输入电脑上显示的 8 位访问 PIN」+ 「用这个 PIN 连接」+ 「重新找一次」。
+- 新增「在局域网里找电脑」按钮，放在「扫码连接」上面 —— 它不需要用户做任何事，
+  而扫码要用户跑去电脑前对着屏幕，先给最省事的那条路。
+- 空态文案从「先扫电脑上的二维码」改成「装好后会自动扫一遍同一 Wi-Fi 下的电脑」。
+- `onDestroy` 里 `lanDiscovery.cancel()`：一轮是 254 个 TCP 连接，退出后还在发纯属浪费。
+- 扫描过程与结果都打 `Log.i("DshRemote", "lan discovery done, found=N")`，真机上可直接看。
+
+### 22.6 单测
+
+新增 `LanDiscoveryTest`（23 条）+ `LanAdoptTest`（11 条），全部纯 JVM、不需要设备。
+
+最值钱的是**反面**用例：
+
+| 用例 | 钉住的事 |
+|---|---|
+| `looksLikePocket_rejectsOtherServices` | 不认 `TP-LINK 路由器设置`，否则 254 个地址里任何一个路由器都会被当成电脑 |
+| `looksLikePocket_doesNotDependOnLength` | 同一页面 4210 / 3969 两种长度都要认，钉住「不能用长度当指纹」 |
+| `tokenOf_ignoresFragmentOnlyToken` | `#?token=` 不是凭据 |
+| `rebind_preservesHttpsScheme` | 迁移不得把 https 降级成 http |
+| `plan_doesNotRebindWhenMultipleComputersAnswer` | 多台答话时不搬 PIN，防连错机器 |
+| `plan_exactMatchStillWinsWhenOthersAlsoAnswer` | 自己那台在旁边还有别的机器时仍要直连自己那台 |
+| `plan_asksForPinWhenSavedEntryHasNoPin` | 存着裸地址时不能凭空造 PIN |
+
+### 22.7 结果
+
+`gradle :app:assembleDebug :app:testDebugUnitTest :app:lintDebug` → BUILD SUCCESSFUL。
+
+```
+tests=176 failures=0 errors=0
+AutoConnectTest 7 / BackNavigationDeciderTest 18 / BootstrapUrlTest 10 / CookieNamesTest 10 /
+EndpointTest 24 / HandshakeHealGateTest 10 / HostMatchTest 17 / LanAdoptTest 11 /
+LanDiscoveryTest 23 / PageProbeTest 20 / RecoveryExecutorTest 12 / RecoveryPlannerTest 14
+```
+
+测试基线 142 → **176**；lint **0 error / 22 warning**；APK `app-debug.apk` **7,365,924 B**。
+
+**真机未验**（`adb devices` 当前无在线设备 —— `ZY22GHMK5F` 已断开）。
+装回去之后要看三件事：① 全新安装（清数据）是否 ~2 秒内自己进主界面；
+② 扫到但没 PIN 时 `foundBox` 是否正确出现；③ 走流量时是否**不**触发扫描。
+
+### 22.8 还没解决的
+
+- **全新安装 + 手机里没 PIN** 时，仍然要用户输一次 PIN。这是 dsh-pocket 设计决定的
+  （PIN 无接口可读），除非在电脑侧把 `lanAuthEnabled` 关掉让局域网免密
+  （`lib/index.js:336-339`）—— 那是降低安全性的选择，没做。
+- 扫到多台电脑时只会 `AskPin` 第一台，没有「列出全部让用户挑」。多台场景在家里几乎不存在，
+  先按最简处理。

@@ -49,6 +49,36 @@ class MainActivity : AppCompatActivity() {
     private lateinit var emptyHint: TextView
     private lateinit var inputUrl: EditText
 
+    /**
+     * 「局域网里找到了一台电脑、等着输 PIN」那一块的容器。
+     *
+     * 为什么会存在：第一次装 App 的用户手机里没有任何档案，dsh-pocket 又没有
+     * mDNS/SSDP 能被发现，所以只能自己扫 /24 找出电脑（254 个地址并发扫完
+     * 实测 1.86 秒）。扫到之后**唯一还缺的就是 PIN**——它是 dsh-pocket 进程级的
+     * 一把钥匙（`~/.dsh/dsh-pocket/token-lan`），手机侧无法凭空知道。
+     *
+     * 这一块就是把「知道主机了，只差 PIN」这个中间态显式做出来，
+     * 而不是把用户扔回「请扫二维码」的零信息状态。
+     */
+    private lateinit var foundBox: LinearLayout
+    private lateinit var foundLabel: TextView
+    private lateinit var inputPin: EditText
+
+    /** 最近一次扫到的主机地址（不含端口）。输入 PIN 后用它拼地址。 */
+    private var foundHost: String? = null
+
+    /**
+     * 本轮扫描已命中的主机。
+     *
+     * 为什么不「扫到一台就立刻连」：扫完才知道有没有第二台在 3081 上答话，
+     * 而这直接决定「能不能把旧 PIN 搬过去」（多台时搬有可能连到别人家机器上，
+     * 见 [LanAdopt]）。留到 onDone 一起判，代价只有不到两秒。
+     */
+    private val lanFound = mutableListOf<String>()
+
+    /** 局域网扫描器。Activity 销毁时必须停手，否则退出后还在发 254 个 SYN。 */
+    private val lanDiscovery = LanDiscovery()
+
     private lateinit var webView: WebView
     private lateinit var progress: ProgressBar
 
@@ -137,13 +167,20 @@ class MainActivity : AppCompatActivity() {
     /**
      * 开机自动连接。
      *
-     * 优先用最后使用过的连接；一个都没有时，用**构建时注入**的本机示例地址建档并连过去。
+     * 三级回落，每一级都比上一级更依赖用户动手：
      *
-     * 注入值来自 `local.properties` 的 `dsh.lanUrl` / `dsh.lanPin`（不进仓库，见
-     * [BootstrapUrl] 的注释）。没有注入时 [BuildConfig.DEFAULT_LAN_URL] 是空串，
-     * 这里会退回连接列表并走「扫码 / 手输」引导 —— **这是故意的**：
-     * 内置一个写死的 `?token=` 既会泄漏 dsh-pocket 的局域网 PIN，也会在换网段后
-     * 变成一个连不上的地址，让用户以为是网络故障。
+     *  1. **用最后使用过的连接**（`connections.lastUsed()`）——装过一次之后永远走这条，
+     *     用户完全看不到任何中间界面。
+     *  2. **构建时注入的本机示例地址**（`local.properties` 的 `dsh.lanUrl`/`dsh.lanPin`）——
+     *     只在自己编译给自己用时存在。CI 包里 [BuildConfig.DEFAULT_LAN_URL] 是空串，
+     *     **这是故意的**：内置写死的 `?token=` 会泄漏 dsh-pocket 的局域网 PIN，
+     *     也会在换网段后变成一个连不上的地址。
+     *  3. **扫局域网找电脑**（[startLanDiscovery]）——走到这里说明是全新安装、
+     *     手机里一条档案都没有。这正是「第一次装完 App 必须扫码或手输」的那个场景。
+     *     现在改成先自己扫一遍：254 个地址并发扫完实测 1.86 秒，扫到一台就直接进。
+     *
+     * 扫到之后还差 PIN（它是 dsh-pocket 进程级的一把钥匙，没有 mDNS 可以读到），
+     * 但此时用户只需要输 8 位数字，不必再去电脑前扫二维码。
      */
     private fun autoconnect() {
         when (val plan = AutoConnect.decide(connections.lastUsed(), DEFAULT_LAN_URL, System.currentTimeMillis())) {
@@ -152,8 +189,95 @@ class MainActivity : AppCompatActivity() {
                 applyList(connections.upsert(plan.endpoint))
                 connect(plan.endpoint, persist = false)
             }
-            AutoConnectPlan.ShowList -> showList()
+            AutoConnectPlan.ShowList -> {
+                showList()
+                // 落到列表页说明没有可用档案 —— 这时不该让用户面对「请扫码」发呆，
+                // 先自己去局域网里找一趟。
+                startLanDiscovery(manual = false)
+            }
         }
+    }
+
+    /**
+     * 扫一遍局域网找 dsh-pocket。
+     *
+     * @param manual 用户主动点的（true）还是开机自动起的（false）。
+     *   两者的差别只在**失败时说不说话**：开机那次没扫到就安静地落回列表，
+     *   不应在用户还没打算连接的时候弹 Toast。
+     */
+    private fun startLanDiscovery(manual: Boolean) {
+        val localIp = LanScan.localLanIpv4()
+        if (localIp == null) {
+            // 没连 Wi-Fi（走流量 / 飞行模式）：扫出来的只会是运营商 NAT 网段，
+            // 一台电脑都不会有，白等两秒。这里直接说清原因。
+            if (manual) toast("先连上和电脑同一个 Wi-Fi 再找")
+            return
+        }
+
+        lanFound.clear()
+        foundHost = null
+        foundBox.visibility = View.GONE
+        emptyHint.text = LAN_SEARCHING_HINT
+
+        lanDiscovery.scan(
+            localIp = localIp,
+            onFound = { host -> runOnUiThread { lanFound.add(host) } },
+            onDone = { count ->
+                android.util.Log.i("DshRemote", "lan discovery done, found=$count")
+                runOnUiThread { onLanScanDone(manual) }
+            },
+        )
+    }
+
+    private fun onLanScanDone(manual: Boolean) {
+        emptyHint.text = EMPTY_HINT
+
+        val plan = LanAdopt.plan(
+            saved = connections.all().sortedByDescending { it.lastUsedAt },
+            foundHosts = lanFound.toList(),
+        )
+        when (plan) {
+            is LanAdoptPlan.Adopt -> {
+                // 认识这台电脑（同 IP，或 PIN 能搬过去）：直接进，用户看不到任何中间页。
+                applyList(connections.upsert(plan.endpoint))
+                connect(plan.endpoint, persist = false)
+            }
+
+            is LanAdoptPlan.AskPin -> {
+                // 扫到了但没有 PIN：只差这一步，把输入框亮出来。
+                // host 从 plan.url 里取，而不是复用 label —— label 是给人看的名字，
+                // 以后换成「客厅那台电脑」这类友好名时不该把连接逻辑带崩。
+                foundHost = Endpoint.hostOf(plan.url)
+                foundLabel.text = "${plan.label} · 电脑上「设置 → 手机访问」里那串 PIN"
+                foundBox.visibility = View.VISIBLE
+                inputPin.requestFocus()
+                toast("找到了 ${plan.label}")
+            }
+
+            LanAdoptPlan.None -> {
+                if (manual) toast("没找到电脑。确认电脑上 DeepSeek Harness 已开启手机访问")
+            }
+        }
+    }
+
+    /** 用户输入 PIN 之后拼地址并连接。 */
+    private fun connectWithPin() {
+        val host = foundHost ?: return
+        val pin = inputPin.text?.toString()?.trim().orEmpty()
+        if (pin.isEmpty()) {
+            toast("请输入电脑上显示的 PIN")
+            return
+        }
+        // 必须带上端口：BootstrapUrl.build 只补 scheme，不会补端口，
+        // 传裸主机名会拼成 `http://<ip>/?token=…`（80 端口），连不上 3081。
+        val url = BootstrapUrl.build("http://$host:${LanScan.PORT}", pin)
+        if (url == null) {
+            toast("这个 PIN 拼不出可用地址，检查一下有没有输错")
+            return
+        }
+        inputPin.setText("")
+        foundBox.visibility = View.GONE
+        saveAndConnect(url)
     }
 
     /**
@@ -364,12 +488,57 @@ class MainActivity : AppCompatActivity() {
         column.addView(savedRows)
 
         emptyHint = TextView(this).apply {
-            text = "还没有保存的连接。\n先扫电脑上的二维码，或在下方手动填地址。"
+            text = EMPTY_HINT
             textSize = 14f
             setTextColor(INK_DIM)
             setPadding(0, dp(4), 0, dp(10))
         }
         savedRows.addView(emptyHint)
+
+        // ---- 扫到了但这台电脑还没有 PIN：只差这一步 ----
+        //
+        // 布局位置在「已保存的连接」下面、「手动连接」上面：它比手动填一整个 URL
+        // 更接近用户此刻的状态（知道了是哪台电脑，只缺密码），但不该抢掉
+        // 已有连接的位置。默认 GONE，只有真的扫到才显示。
+        foundBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, dp(14), 0, 0)
+        }
+        foundBox.addView(TextView(this).apply {
+            text = "在局域网里找到了一台电脑"
+            textSize = 13f
+            setTextColor(INK_DIM)
+            setPadding(0, 0, 0, dp(4))
+        })
+        foundLabel = TextView(this).apply {
+            text = ""
+            textSize = 15f
+            setTextColor(INK)
+            setPadding(0, 0, 0, dp(6))
+        }
+        foundBox.addView(foundLabel)
+        inputPin = EditText(this).apply {
+            hint = "输入电脑上显示的 8 位访问 PIN"
+            textSize = 15f
+            isSingleLine = true
+            setTextColor(INK)
+            setHintTextColor(0xFF8A90A0.toInt())
+            setBackgroundResource(R.drawable.input_bg)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or
+                android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD
+        }
+        foundBox.addView(inputPin)
+        foundBox.addView(Button(this).apply {
+            text = "用这个 PIN 连接"
+            setOnClickListener { connectWithPin() }
+        })
+        foundBox.addView(Button(this).apply {
+            text = "重新找一次"
+            setOnClickListener { startLanDiscovery(manual = true) }
+        })
+        column.addView(foundBox)
 
         // 手动输入区
         column.addView(TextView(this).apply {
@@ -420,6 +589,13 @@ class MainActivity : AppCompatActivity() {
         if (DEFAULT_LAN_URL.isNotBlank()) {
             column.addView(fillBtn)
         }
+
+        // 「在局域网里找电脑」放在扫码上面：它不需要用户做任何事，
+        // 而扫码要用户跑去电脑前对着屏幕。先给最省事的那条路。
+        column.addView(Button(this).apply {
+            text = "在局域网里找电脑"
+            setOnClickListener { startLanDiscovery(manual = true) }
+        })
 
         val scanBtn = Button(this).apply {
             text = "扫码连接"
@@ -961,6 +1137,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // 停掉局域网扫描：一轮是 254 个 TCP 连接，用户已经退出还继续发既是浪费，
+        // 也会让下一次进入时的日志里混进上一轮的 onDone。
+        lanDiscovery.cancel()
         if (this::webView.isInitialized) {
             // 先撤掉还在排队的延迟任务。健康复查那个 Runnable 活 1.4 秒，
             // 不取消就会在已销毁的 WebView 上跑（`isFinishing` 只是兜底，不是取消）。
@@ -990,6 +1169,17 @@ class MainActivity : AppCompatActivity() {
         val INK = 0xFF111318.toInt()
         val INK_DIM = 0xFF5A6070.toInt()
         val SURFACE = 0xFFFFFFFF.toInt()
+
+        /**
+         * 「还没有保存的连接」的默认文案。
+         *
+         * 单独提出来是因为它会被扫描过程临时改写（见 [LAN_SEARCHING_HINT]），
+         * 扫描结束后必须一个字不差地还原 —— 内联两处字面量迟早会改漏一边。
+         */
+        const val EMPTY_HINT = "还没有保存的连接。\n装好后会自动扫一遍同一 Wi-Fi 下的电脑；\n扫不到就扫电脑上的二维码，或在下方手动填地址。"
+
+        /** 正在扫局域网时占位在「已保存的连接」位置上的文案。 */
+        const val LAN_SEARCHING_HINT = "正在同一 Wi-Fi 下查找电脑…（约 2 秒）"
 
         /**
          * 「提醒但不用报错色」的橙。

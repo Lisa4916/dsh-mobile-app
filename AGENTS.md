@@ -39,7 +39,7 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
-# 构建 + 单测（两条一起跑，基线 tests=142 failures=0）
+# 构建 + 单测（两条一起跑，基线 tests=176 failures=0）
 & 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
     -p 'D:\dsh-mobile-app' :app:assembleDebug :app:testDebugUnitTest --console=plain -q
 
@@ -101,10 +101,11 @@ dsh.lanPin=<token-lan 的内容>
 | 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness`；三次强化后共 **26 篇**（含平台版本节奏、Android 16 迁移、WebView 安全基线、渲染进程兜底、R8/发布、测试分层、架构分层、敏感数据、性能验证、启动阶段 CSS 过渡闪屏） | ✅ 见 §8 |
 | 11 | 体检出的四个问题：同域判定 / 状态栏前景 / 文案 / 渲染进程兜底 | ✅ 见 §6.21–§6.23 |
 | 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
-| 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
+| 10 | 任务完成通知 / 文件拍照附件 / 多电脑一键切换 | ⏳（局域网自动发现已做，见第 15 行） |
 | 12 | 体检剩余四项：删无用权限与资源 / release 补齐 / 长按删除加确认 / 收敛 strings 与颜色 | ✅ 第 16 步 |
 | 13 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ 见 §6.28 |
 | 14 | 第二台手机装机与收更新：版本号单一来源 + release 分发页 | ✅ 见 §6.29 |
+| 15 | 装完就能连：自动扫局域网找电脑，扫到只差 PIN | ✅ 见 §6.31 |
 
 **第 7 项现状（2026-11-02 重测，旧结论已作废）**：`cloudflared.exe` 在
 `C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B，2026.10.7）。
@@ -157,6 +158,15 @@ app/src/main/java/com/dsh/remote/
 │                        shouldOpenExternally(target, allowedHost)：只对 http(s) 生效，
 │                          mailto:/tel:/about: 一律 false（否则点电话链接会把浏览器踹出来）
 │                        ⚠ 以前是 url.contains(host) —— 子串包含，evil.com/?x=<host> 等三种绕过全成功
+├── LanDiscovery.kt      局域网自动发现电脑（§6.31）
+│                        LanScan（纯 JVM）：candidates() / looksLikePocket() / tokenOf() /
+│                          rebind(old, newHost) / schemeOf() / portOf() /
+│                          localIpv4() / isWifiLikeInterface() / localLanIpv4()
+│                        LanDiscovery（Android）：48 并发、TCP 300ms、HTTP/1.0 命中即返回、cancel()
+│                        ⚠ 钉死 /24 不按掩码展开；判据只能看正文，**不能看响应长度**
+├── LanAdopt.kt          「扫到之后怎么办」的纯决策（§6.31）
+│                        plan(saved, foundHosts, port) → Adopt / AskPin / None
+│                        ⚠ 多台电脑答话时绝不搬 PIN —— 有可能连到别人家机器上
 ├── CookieNames.kt       「删哪类 cookie」的唯一判据（纯 JVM）
 │                        AUTH_PREFIX / POCKET / selectForRemoval(all, pocket) / expiryDirective
 │                        ⚠ 以前这段逻辑在 Activity 里写了两遍（clearAuthCookies 与
@@ -699,6 +709,69 @@ SHA-256 `b10f01536c8a187be776d618c4bd9084421453e3e6f95bf5b4a6ce85cd2770f8` 与�
    `PUT /repos/{owner}/{repo}/contents/{path}` 逐文件提交，再
    `POST /git/tags` + `PATCH /git/refs/tags/vX.Y.Z` 把 annotated tag 重指到新提交。
    **发版前先探一句 `git ls-remote origin`**，不通就别指望 `publish-release.cjs` 能推上去。
+
+### 6.31 「装完就能连」：自动扫局域网，但 PIN 必须由用户给
+
+用户报的现象：从 GitHub Release 装完 App，第一屏永远是「扫码连接 / 手动连接」。
+根因不是没写自动连接，而是**三级回落全落空**：全新安装没有 lastUsed；
+CI 包里 `BuildConfig.DEFAULT_LAN_URL` 是空串（故意，防 PIN 进公开仓库）；于是只剩扫码。
+
+#### 为什么只能自己扫
+
+查过 dsh-pocket 服务端（v2.12.0）：`lib` 下所有 js 里
+`mdns|bonjour|discovery|broadcast|multicast|ssdp` **零命中** —— 它不广播自己，也不响应发现。
+所以手机侧只能扫 /24。实测 **254 个地址、并发 48、TCP 超时 300ms，1.86 秒扫完**。
+
+#### 五条硬约束（每条都踩过）
+
+1. **钉死 /24，不按真实掩码展开。** 家里若是 /16，展开是 65,534 个地址，手机上跑不完也没意义。
+2. **判据只能是正文含 `DSH Pocket` / `DeepSeek Harness`，不能用响应长度。**
+   同一个「访问验证」页实测出现过 **4210 B 与 3969 B** 两种长度。
+   不判正文的话，254 个地址里任何一个路由器后台都会被当成电脑。
+3. **`tokenOf` 必须先砍 fragment 再找 `?`。** `http://h/#?token=x` 里的 token 是 fragment 的，
+   服务端根本收不到；反过来先找 `?` 就会把它当有效凭据。
+4. **`rebind` 必须带原 scheme。** `BootstrapUrl.build` 见到无 scheme 输入会补 `http://`，
+   于是 `https://` 的档案迁移后**悄悄降级成明文** —— 用户不会察觉，但 cookie 开始裸奔。
+5. **扫描汇总要放独立线程等 `CountDownLatch`**，不能提到同一个线程池：
+   池满时永远轮不到，表现是「扫完了但一直不回调」。
+
+#### 扫到 ≠ 能连：PIN 这一层要说清楚
+
+PIN 是 dsh-pocket **进程级**的一把钥匙（`~/.dsh/dsh-pocket/token-lan`），未认证时没有任何接口能读到。
+实测四种请求只有「局域网 PIN」会下发 `Set-Cookie`：
+
+| 请求 | 状态 | `Set-Cookie` |
+|---|---|---|
+| 无 token | 200 | 无 |
+| 局域网 PIN | 200 | `dsh-auth-*` + `dsh_pocket_token` |
+| 错 PIN | 200 | 无 |
+| **公网 PIN 打在局域网端口上** | 200 | 无（两把不同的钥匙） |
+
+所以扫描只解决「电脑在哪」，解决不了「PIN 是多少」。改进是把「跑到电脑前扫二维码」
+压缩成「输 8 位数字」，不是消灭这一步。
+
+#### 什么时候可以沿用旧 PIN
+
+`LanAdopt.plan` 的判据：
+
+- 扫到的主机 == 已保存档案的主机 → 直接连；
+- **只有一台**电脑答话、且有带 PIN 的档案 → `rebind` 把 PIN 搬到新 IP
+  （PIN 是进程级的，不随 DHCP 变，所以换地址后仍然有效）；
+- **多台**电脑答话 → 一律 `AskPin`。手机侧分不清是哪台，搬 PIN 有可能连到别人家机器上，
+  宁可让用户多看一眼；
+- 没有任何带 PIN 的档案 → `AskPin`；
+- 一台都没扫到 → 落回列表 + 手输/扫码。
+
+#### 走流量时不扫
+
+`localLanIpv4()` 只认 `wlan/ap/swlan/eth/rndis/usb` 前缀的接口，不用 `ConnectivityManager`
+（那要 `ACCESS_NETWORK_STATE` 权限，本项目已删）。扫运营商 NAT 网段白等两秒，一台电脑都不会有。
+
+#### 排查
+
+扫描过程与结果都打 `Log.i("DshRemote", "lan discovery done, found=N")`。
+真机上「没找到电脑」先看这行有没有出现：没出现说明根本没起扫描（多半不是 Wi-Fi），
+出现且 `found=0` 才是网络问题。
 
 ---
 

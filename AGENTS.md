@@ -39,7 +39,7 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
-# 构建 + 单测（两条一起跑，基线 tests=189 failures=0）
+# 构建 + 单测（两条一起跑，基线 tests=235 failures=0）
 & 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
     -p 'D:\dsh-mobile-app' :app:assembleDebug :app:testDebugUnitTest --console=plain -q
 
@@ -107,6 +107,7 @@ dsh.lanPin=<token-lan 的内容>
 | 14 | 第二台手机装机与收更新：版本号单一来源 + release 分发页 | ✅ 见 §6.29 |
 | 15 | 装完就能连：自动扫局域网找电脑，扫到只差 PIN | ✅ 见 §6.31 |
 | 16 | 免 PIN 直进主界面：扫描时识别「这台电脑不需要 PIN」 | ✅ 见 §6.32 |
+| 17 | 出门只插流量也能连：抓公网地址 + 连不上立刻回落 + 没 Wi-Fi 不等局域网 | ✅ 见 §6.33 |
 
 **第 7 项现状（2026-11-02 重测，旧结论已作废）**：`cloudflared.exe` 在
 `C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B，2026.10.7）。
@@ -166,8 +167,18 @@ app/src/main/java/com/dsh/remote/
 │                        LanDiscovery（Android）：48 并发、TCP 300ms、HTTP/1.0 命中即返回、cancel()
 │                        ⚠ 钉死 /24 不按掩码展开；判据只能看正文，**不能看响应长度**
 ├── LanAdopt.kt          「扫到之后怎么办」的纯决策（§6.31）
-│                        plan(saved, foundHosts, port) → Adopt / AskPin / None
+│                        plan(saved, hits, port) → Adopt / AskPin / None
 │                        ⚠ 多台电脑答话时绝不搬 PIN —— 有可能连到别人家机器上
+├── ConnectWatchdog.kt   「这次是慢还是根本连不上」的判据（纯 JVM，§6.33）
+│                        verdict(elapsed, maxProgress) / hopeless(url, onLan) / giveUpMessage(url)
+│                        ⚠ hopeless 单独判「没 Wi-Fi 却连私有网段」：实测这条路上 maxProgress
+│                          能到 10，光靠「进度没动」会白等满 30 秒
+├── PocketStatus.kt      从 pocket.status RPC 里取公网地址（纯 JVM，§6.33）
+│                        parse() / publicEndpoint()；payloadScope() 剥 RPC 信封
+│                        ⚠ 字段在 result.value 里，不在顶层；按顶层取键永远拿不到
+├── AutoFailover.kt      连不上时换哪一条（纯 JVM，§6.33）
+│                        pickStart(all, lastUsed, onLan) / next(all, current, triedIds)
+│                        ⚠ 优先换**网络类型**（LAN ↔ PUBLIC），同类另一条失败原因大概率一样
 ├── CookieNames.kt       「删哪类 cookie」的唯一判据（纯 JVM）
 │                        AUTH_PREFIX / POCKET / selectForRemoval(all, pocket) / expiryDirective
 │                        ⚠ 以前这段逻辑在 Activity 里写了两遍（clearAuthCookies 与
@@ -890,6 +901,90 @@ isProtected: (host) => {
 3. 按钮亮带 `y=2208..2325 x=424..844` → 中心 `(634, 2266)`；
 4. 两次点击用 `monkey -f` 的自定义手势脚本注入（`DispatchPointer` + `UserWait(600)`），
    判据看 `Events injected:` 非 0；**先勾选、隔 ≥1.2 秒再点按钮**，顺序反了不生效。
+
+### 6.33 出门只插流量也要能连：三条各自独立、缺一就白等
+
+用户的原话是「在外面连接使用手机网络，也没有 wifi 啊」。局域网路径天生不通，
+所以「在家能连」和「出门能连」是两件事，各自要单独的机制：
+
+| 能力 | 机制 | 失败表现 |
+|---|---|---|
+| 找到电脑 | 扫 /24（第 22 步） | 列表页「没找到电脑」 |
+| 不需要 PIN | 认响应头 `Set-Cookie: dsh-auth-`（第 23 步） | 停在「输 PIN」屏 |
+| **拿到公网地址** | **`pocket.status` RPC（本节）** | **手机里永远只有局域网那条，出门必连不上** |
+
+#### 铁律一：`pocket.status` 的字段在 `result.value` 里，不在顶层
+
+真实响应（2026-11-03 从真机抓的）：
+
+```json
+{"type":"server-response","rpcId":"r1",
+ "result":{"ok":true,"value":{"proxyPort":3081,"lanUrl":"http://192.168.50.58:3081",
+  "tunnelRunning":true,"tunnelUrl":"https://tunnel-b.trycloudflare.com",
+  "tunnelState":{"phase":"ready","startedAt":…},"dshPort":42591,
+  "accessToken":"87654321","lanToken":"12345678","lanAuthEnabled":false}}}
+```
+
+第一版按顶层取键 → 永远拿不到 → 日志只有一句
+`pocket.status: no usable public address`，**看起来像「隧道没开」，其实隧道好着**。
+正确做法是先 `payloadScope()` 剥到 `result.value`，取不到时退回「整段就是负载」的老格式。
+
+**这条 RPC 必须带 cookie**（裸 POST 恒 `401` + body `unauthorized`），
+cookie 就是 WebView 里已下发的 `dsh-auth-*`；所以调用点放在 `onPageFinished` 之后，
+用 `HttpURLConnection` + `CookieManager.getInstance().getCookie(origin)`。
+**不要用页面里的 `fetch`**：`evaluateJavascript` 的回调不 await Promise，拿到的是 `{}`。
+
+#### 铁律二：「没 Wi-Fi 却连私有网段」是确定不通，不许等进度条
+
+实测这条路上 `maxProgress` 竟然到过 **10**（页面自己画了点东西），
+于是「一点进度都没走」那条判据不触发，**白等满 30 秒**才回落。
+
+`ConnectWatchdog.hopeless(url, onLan)` 单独判这一条：
+
+```kotlin
+if (onLan) return false                       // 有 Wi-Fi 时局域网是最快路径，绝不能提前判死
+return Endpoint.kindOf(target) == Endpoint.Kind.LAN
+```
+
+判据是「有没有 Wi-Fi」（`LanScan.localLanIpv4() != null`），
+**不是「局域网连不连得上」** —— 后者要真拨一次才知道，那正是要避免的等待。
+
+#### 铁律三：换下一条时优先换**网络类型**，不是换最近的
+
+`AutoFailover.next()` 的排序是
+`compareByDescending { kind == preferredKind }.thenByDescending { lastUsedAt }`，
+`preferredKind` = 当前是 LAN 就 PUBLIC、反之亦然。
+同一个网络类型的另一条地址，失败原因大概率一样，试它只是多等一轮。
+
+`pickStart()` 里还有一条：**没 Wi-Fi 而 `lastUsed` 是 LAN 时直接换成最近用过的 PUBLIC**。
+在家连局域网天经地义，所以它必然是 `lastUsed`；但出门之后它还是 `lastUsed`，
+不换就会天天先花一轮去等一个注定不通的地址。
+
+存公网档案时**不要动 `lastUsedAt`**（置 0），否则用户在家连一次局域网，
+下次冷启动就被莫名改走公网（绕远路）。
+
+#### 排查用的日志（跟着这三条看）
+
+```
+I DshRemote: pocket.status: saved public address xxx.trycloudflare.com   ← 抓到了，最该出现的一行
+I DshRemote: pocket.status: no usable public address                     ← 解析失败或隧道没开
+W DshRemote: connect gave up after 30081ms, maxProgress=10, hopeless=false, url=…
+I DshRemote: connect failover -> https://…
+```
+
+`hopeless=true` 却还等了 30 秒 = `hopeless` 没接进 tick；
+`hopeless=false` 而地址是 `192.168.x.x` 且没有 wlan0 = `onLan` 判错了。
+
+#### 手输地址这条退路不可靠
+
+真机上 `adb shell input text` 打公网地址，被讯飞/搜狗输入法的「智能标点」改成全角：
+
+```
+https：//xxx－yyy。trycloudflare。com/？token=87654321
+```
+
+`:`→`：`、`-`→`－`、`.`→`。`、`?`→`？`，地址直接失效。
+所以**能自动抓就别让人手输**；真要手输，`input text` 之后必须回读 EditText 校验。
 
 ---
 

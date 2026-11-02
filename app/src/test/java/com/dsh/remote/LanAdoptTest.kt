@@ -24,7 +24,7 @@ class LanAdoptTest {
 
     @Test
     fun plan_noneWhenNothingFound() {
-        val saved = listOf(ep("http://192.168.50.58:3081/?token=60111186"))
+        val saved = listOf(ep("http://192.168.50.58:3081/?token=12345678"))
         assertEquals(LanAdoptPlan.None, LanAdopt.plan(saved, emptyList()))
     }
 
@@ -36,7 +36,7 @@ class LanAdoptTest {
 
     @Test
     fun plan_adoptsExactHostMatch() {
-        val saved = listOf(ep("http://192.168.50.58:3081/?token=60111186", "192.168.50.58"))
+        val saved = listOf(ep("http://192.168.50.58:3081/?token=12345678", "192.168.50.58"))
         val plan = LanAdopt.plan(saved, listOf(locked("192.168.50.58")))
         assertTrue(plan is LanAdoptPlan.Adopt)
         // 必须原样沿用已保存的那条（PIN、端口都在里面）
@@ -53,16 +53,16 @@ class LanAdoptTest {
     @Test
     fun plan_rebindsPinWhenComputerMovedToNewIp() {
         // 电脑换了 DHCP 地址（PIN 不变），只有它一台在答话
-        val saved = listOf(ep("http://192.168.50.58:3081/?token=60111186", "192.168.50.58"))
+        val saved = listOf(ep("http://192.168.50.58:3081/?token=12345678", "192.168.50.58"))
         val plan = LanAdopt.plan(saved, listOf(locked("192.168.50.77")))
         assertTrue(plan is LanAdoptPlan.Adopt)
-        assertEquals("http://192.168.50.77:3081/?token=60111186", (plan as LanAdoptPlan.Adopt).endpoint.url)
+        assertEquals("http://192.168.50.77:3081/?token=12345678", (plan as LanAdoptPlan.Adopt).endpoint.url)
     }
 
     @Test
     fun plan_doesNotRebindWhenMultipleComputersAnswer() {
         // 两台都在 3081 答话，手机侧无法区分哪台是自己的 —— 搬 PIN 风险太大
-        val saved = listOf(ep("http://192.168.50.58:3081/?token=60111186", "192.168.50.58"))
+        val saved = listOf(ep("http://192.168.50.58:3081/?token=12345678", "192.168.50.58"))
         val plan = LanAdopt.plan(saved, listOf(locked("192.168.50.77"), locked("192.168.50.78")))
         assertTrue(plan is LanAdoptPlan.AskPin)
     }
@@ -70,7 +70,7 @@ class LanAdoptTest {
     @Test
     fun plan_exactMatchStillWinsWhenOthersAlsoAnswer() {
         // 其中一台就是自己认识的那台：即便旁边还有别的机器，也要直连自己那台
-        val saved = listOf(ep("http://192.168.50.58:3081/?token=60111186", "192.168.50.58"))
+        val saved = listOf(ep("http://192.168.50.58:3081/?token=12345678", "192.168.50.58"))
         val plan = LanAdopt.plan(saved, listOf(locked("192.168.50.77"), locked("192.168.50.58")))
         assertTrue(plan is LanAdoptPlan.Adopt)
         assertEquals(saved[0], (plan as LanAdoptPlan.Adopt).endpoint)
@@ -106,7 +106,7 @@ class LanAdoptTest {
     @Test
     fun plan_deduplicatesFoundHosts() {
         // 同一台机器被扫到两次也只算一台，否则会误判成「多台答话」而不搬 PIN
-        val saved = listOf(ep("http://192.168.50.58:3081/?token=60111186", "192.168.50.58"))
+        val saved = listOf(ep("http://192.168.50.58:3081/?token=12345678", "192.168.50.58"))
         val plan = LanAdopt.plan(saved, listOf(locked("192.168.50.77"), locked("192.168.50.77")))
         assertTrue(plan is LanAdoptPlan.Adopt)
     }
@@ -140,7 +140,7 @@ class LanAdoptTest {
     fun plan_openComputerWinsOverRebindingSavedPin() {
         // 存着一条别处的旧档案，而扫到的这台免 PIN：
         // 免 PIN 是更强的信号（不需要任何凭据就能进），优先于搬旧 PIN
-        val saved = listOf(ep("http://192.168.50.58:3081/?token=60111186", "192.168.50.58"))
+        val saved = listOf(ep("http://192.168.50.58:3081/?token=12345678", "192.168.50.58"))
         val plan = LanAdopt.plan(saved, listOf(open("192.168.50.99")))
         assertTrue(plan is LanAdoptPlan.Adopt)
         assertEquals("http://192.168.50.99:3081/", (plan as LanAdoptPlan.Adopt).endpoint.url)
@@ -149,7 +149,7 @@ class LanAdoptTest {
     @Test
     fun plan_exactHostMatchStillWinsOverOpenFlag() {
         // 同一台电脑、手机里已经有带 PIN 的档案：沿用它，不要因为现在免 PIN 就换档案
-        val saved = listOf(ep("http://192.168.50.58:3081/?token=60111186", "192.168.50.58"))
+        val saved = listOf(ep("http://192.168.50.58:3081/?token=12345678", "192.168.50.58"))
         val plan = LanAdopt.plan(saved, listOf(open("192.168.50.58")))
         assertTrue(plan is LanAdoptPlan.Adopt)
         assertEquals(saved[0], (plan as LanAdoptPlan.Adopt).endpoint)

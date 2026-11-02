@@ -37,11 +37,13 @@
 | 21 | GitHub Release 发版：专用签名密钥 + tag 触发构建 | ✅ | Release `v0.2.0` 已发布；`releases/latest/download/dsh-remote-latest.apk` 实测 302→200、1,930,818 B，SHA-256 与 `SHA256SUMS.txt` 一致 |
 | 22 | 装完就能连：自动扫局域网找电脑，扫到只差 PIN | ✅ | 254 地址并发扫完 1.86 s 命中本机；真机 `lan discovery done, found=1` 已复现；单测 142 → 176 |
 | 23 | 免 PIN 直进主界面：扫描时识别「这台电脑不需要 PIN」 | ✅ | 清数据冷启动 313ms 直接落主界面，无 PIN 屏；单测 176 → 189；Release `v0.4.0` 已发布，固定地址实测 1,930,950 B |
+| 24 | 在外面只插流量也能连：抓公网地址 + 连不上立刻回落 + 没 Wi-Fi 不等局域网 | ✅ | 真机只走 4G 冷启动直进主界面；`pocket.status: saved public address …`；单测 189 → 235 |
 
-**测试基线：JVM 单测全量 `tests=189 failures=0 errors=0 skipped=0`**
-（`AutoConnectTest` 7 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
-`EndpointTest` 24 + `HandshakeHealGateTest` 10 + `HostMatchTest` 17 + `LanAdoptTest` 18 +
-`LanDiscoveryTest` 29 + `PageProbeTest` 20 + `RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
+**测试基线：JVM 单测全量 `tests=235 failures=0 errors=0 skipped=0`**
+（`AutoConnectTest` 7 + `AutoFailoverTest` 14 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 +
+`ConnectWatchdogTest` 15 + `CookieNamesTest` 10 + `EndpointTest` 24 + `HandshakeHealGateTest` 10 +
+`HostMatchTest` 17 + `LanAdoptTest` 18 + `LanDiscoveryTest` 29 + `PageProbeTest` 20 +
+`PocketStatusTest` 17 + `RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
 **真机 instrumented：`PageProbeJsTest` 7 条 `OK (7 tests)`**（Redmi `8PCE7LJB99VG7TRO`，Android 15）
 **APK：`app-debug.apk` 7,365,924 B / `app-release.apk` 1,976,330 B**（versionName 0.1.0，versionCode 1）
 **lint：0 error / 22 warning**
@@ -1754,9 +1756,9 @@ dsh-pocket 的 PIN 是**进程级的一把钥匙**（`~/.dsh/dsh-pocket/token-la
 | 请求 | 状态 | `Set-Cookie` | 标题 |
 |---|---|---|---|
 | 无 token | 200 | 无 | DSH Pocket · 访问验证 |
-| `?token=60111186`（局域网 PIN） | 200 | `dsh-auth-*` + `dsh_pocket_token` | 正在进入 |
+| `?token=12345678`（局域网 PIN） | 200 | `dsh-auth-*` + `dsh_pocket_token` | 正在进入 |
 | `?token=00000000`（错 PIN） | 200 | 无 | 访问验证 |
-| `?token=75330002`（公网 PIN） | 200 | 无 | 访问验证 |
+| `?token=87654321`（公网 PIN） | 200 | 无 | 访问验证 |
 
 → 判据是「有没有下发 `Set-Cookie`」；公网 PIN 在局域网端口上无效（两把不同的钥匙）。
 → 所以扫描能解决「电脑在哪」，解决不了「PIN 是多少」。这一步必须由用户提供，
@@ -1999,3 +2001,99 @@ POST /git/blobs（逐文件 base64）→ POST /git/trees（base_tree）
 
 修完实测：`新 tree = 7d1e6e7b...（与本地树一致 ✅）`，远端 master `74fa61f`，
 CI 最后一个 run completed / **success**。
+
+---
+
+## 第 24 步：在外面只插流量也能连 ✅
+
+用户原话两轮：
+
+> 「当前设备远程连接不上」
+> 「在外面连接使用手机网络，也没有 wifi 啊」
+
+第二句把问题问清楚了：这台手机长期只插流量卡，**局域网路径天然不通**，
+所以「局域网能连、公网靠手输」这条路不能算解决。
+
+### 24.1 三个真因（全部在真机上量出来）
+
+| # | 现象 | 真因 | 证据 |
+|---|---|---|---|
+| 1 | 页面纯黑 `#151517`，90 秒不动 | 手机上装的那个「0.4.0」是**本机注入过 `dsh.lanUrl` 的 release 包**，冷启动直奔 `http://192.168.50.58:3081`；私网地址的 SYN 被静默丢弃（不回 RST），`onReceivedError` 与 `onPageFinished` **一次都不触发** | 从设备拉回 `base.apk`，扫 dex 命中 `192.168.50.58` / `12345678`；9 次采样全 0 文本节点 |
+| 2 | 手机永远只有局域网一条档案 | `pocket.status` 的**字段不在顶层**，而在 `result.value` 里；按顶层取键永远拿不到 `tunnelUrl` | 日志 `pocket.status: no usable public address`；实测响应 `{"result":{"ok":true,"value":{…}}}` |
+| 3 | 明明没 Wi-Fi 还白等 30 秒 | 私网地址被丢弃时 `maxProgress` 竟然到过 **10**，于是「一点进度都没走」那条判据不触发，一路等满硬上限 | 日志 `connect gave up after 30081ms, maxProgress=10` |
+
+### 24.2 落地的三件套（`D:\dsh-mobile-app\app\src\main\java\com\dsh\remote\`）
+
+**`ConnectWatchdog.kt`** —— 判「这次是在慢慢加载，还是根本连不上」：
+
+| 判据 | 什么时候判死 | 为什么是这个数 |
+|---|---|---|
+| `maxProgress <= 0 && elapsed >= 8s` | 一点进度都没走过 | 正常远程页面 8 秒内必到 100；被丢弃时 90 秒仍是 0 |
+| `elapsed >= 30s` | 动过但走不完 | 首屏偶尔到 12 秒，不能更小 |
+| `hopeless(url, onLan)` | **没连 Wi-Fi 且地址是私有网段** —— 立刻判死，不等任何秒数 | 这不是「可能慢」，是「一定不通」 |
+
+`giveUpMessage()` 分两种说法：内网地址就说「你当前没连 Wi-Fi，局域网地址只能在同一个 Wi-Fi 下用」；
+公网地址就说「地址可能已经变了，去电脑上看一眼」。
+
+**`PocketStatus.kt`** —— 从 dsh-pocket 的 RPC 里把公网地址取出来：
+
+- `RPC_PATH = "/dsh-pocket/pocket.status"`；
+- 响应是信封 `{"type":"server-response","rpcId":"r1","result":{"ok":true,"value":{…}}}`，
+  所以先 `payloadScope()` 剥到 `result.value`，取不到时退回「整段就是负载」的老格式；
+- `publicEndpoint()` 三条硬约束：`tunnelRunning` 必须真（关隧道后 url 仍留着，照抄得 530 死地址）、
+  必须 `https://` 且 host 以 `.trycloudflare.com` 结尾、必须带 `accessToken`；
+- **不引 JSON 库**：单测跑纯 JVM，`org.json` 那里是空实现；自己写 `topLevelKeys()` 判层深，
+  防止 `tunnelState` 之类的嵌套同名键冒充顶层字段。
+
+**`AutoFailover.kt`** —— 选下一条该试谁：
+
+- `pickStart(all, lastUsed, onLan)`：有 Wi-Fi 就用 `lastUsed`；**没 Wi-Fi 而 `lastUsed` 是 LAN 时直接换成最近用过的 PUBLIC**；
+- `next(all, current, triedIds)`：**优先换一种网络类型**（LAN ↔ PUBLIC），同类型里按 `lastUsedAt` 从新到旧，试过的绝不重试。
+
+**`MainActivity` 接线**：
+- `autoconnect()` 先过 `AutoFailover.pickStart`；
+- 守望 tick 里先问 `hopeless`，再问 `verdict`；
+- 判死后先 `AutoFailover.next` 换一条，换不到才 toast 原因 + 回落列表页；
+- `onPageFinished` 后 `maybeCapturePublicAddress()`：用 `HttpURLConnection` 带 `CookieManager` 的 cookie
+  去 POST `pocket.status`，把公网地址存进档案（**不动 `lastUsedAt`**，否则用户在家连一次局域网，
+  下次就被莫名改走公网）。
+  **不能用页面里的 `fetch`**：`evaluateJavascript` 的回调不 await Promise，拿到的是 `{}`。
+
+### 24.3 新增 22 条单测
+
+`ConnectWatchdogTest` 9 → 15（新增 `hopeless_*` 5 条 + `giveUpMessage` 1 条）、
+`PocketStatusTest` 11 → 17（新增信封 6 条，夹具是**真机原始响应**）、
+`AutoFailoverTest` 14 条。
+
+反面用例最值钱，例如：
+- `parse_envelopeIgnoresLookalikeKeysInsideValue` —— 往 `tunnelState` 里塞 `tunnelUrl` 也不能被当真；
+- `hopeless_publicUrlWithoutWifiIsNotHopeless` —— 公网慢也要等，不能提前掐；
+- `hopeless_lanUrlWithWifiIsWorthTrying` —— 有 Wi-Fi 时局域网是最快路径。
+
+### 24.4 真机验证（Redmi `8PCE7LJB99VG7TRO` / Android 15）
+
+```
+有 Wi-Fi 冷启动 → 日志 I DshRemote: pocket.status: saved public address tunnel-b.trycloudflare.com
+断 Wi-Fi，只留 ccmni1 10.66.64.247/8 → am force-stop + am start -W（TotalTime: 286）
+等 40 秒 → uiautomator 出现 "DeepSeek Harness" WebView + "探索未至之境" + "默认工作区"
+```
+
+**只走 4G 冷启动直接进主界面**，这是这一步的目标。
+
+### 24.5 结果
+
+| 项 | 值 |
+|---|---|
+| JVM 单测 | **`tests=235 failures=0 errors=0`**，15 个测试类（189 → 235，新增 46 条） |
+| lint | **0 errors / 22 warnings** |
+| release APK | **1,947,334 B** |
+| 真机 | 只走 4G 冷启动 → 主界面（无黑屏、无 PIN 屏、无白等 30 秒） |
+
+### 24.6 还没解决的
+
+- **`github.com:443` 的 TLS 时通时不通**，所以这一步的提交仍要靠 `tools/push-via-api.mjs` 走 GitHub API。
+- **GitHub Release 的包不带内置地址是故意的**（防 PIN 进公开仓库），所以「装完直接能连」
+  依赖两个东西：局域网自动发现（第 22 步）+ 免 PIN 识别（第 23 步）+ 公网地址自动抓取（本步）。
+  三者缺一，出门就得手输。
+- 手输地址链路在真机上**被输入法坑过**：讯飞/搜狗会把手打的 `:` `-` `.` `?` 换成全角
+  （`https：//…－…。…/？token=`），地址直接失效。这也是「不要靠手输」的另一个理由。

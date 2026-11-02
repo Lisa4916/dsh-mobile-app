@@ -13,6 +13,11 @@ App 会自己在同一 Wi-Fi 的 /24 里扫一遍（254 个地址并发、约 2 
 第一屏就是 DeepSeek Harness。代价是同一 Wi-Fi 内任何设备都能免密访问 —— 家里网络可信才这么开。
 保留 PIN（默认）时退回「扫到电脑 + 输一次 8 位数字」。
 
+**第 24 步：出门只插流量也能连。** 连上之后 App 会顺手向电脑要一次公网隧道地址并存进档案
+（`pocket.status` RPC，字段在 `result.value` 里）；之后没有 Wi-Fi 时冷启动会**直接挑公网那条**，
+不再先去等一个注定不通的局域网地址。连不上也不再是黑屏干等：没 Wi-Fi 还连私有网段是**立刻**判死，
+其余情况 8 秒 / 30 秒两道上限，判死后自动换下一条，换不到才回落列表页并说清原因。
+
 **局域网与公网都已在真机跑通。** 手机屏幕上就是电脑上正在进行的同一段对话，
 含流式输出、工具卡片、子智能体状态。公网走 Cloudflare quick tunnel，关掉 Wi-Fi 走 4G 也能进主界面。
 
@@ -59,6 +64,9 @@ dsh-pocket 反向代理（认证 + cookie + 注入 launch token）
 | `HostMatch.kt` | 63 | 「算不算同一个站」的唯一判据：host 精确比对 + 点子域边界，`mailto:`/`tel:` 不丢浏览器 |
 | `LanDiscovery.kt` | 276 | 局域网自动发现：`LanScan`（纯 JVM，候选地址/正文判据/免 PIN 判据/搬 PIN）+ `LanDiscovery`（48 并发扫 254 个地址，约 2 秒，返回 `LanHit(host, open)`） |
 | `LanAdopt.kt` | 96 | 扫到之后怎么办的纯决策：`Adopt` / `AskPin` / `None`，**免 PIN 电脑直接连、多台电脑答话时绝不搬 PIN** |
+| `ConnectWatchdog.kt` | 89 | 「是慢还是根本连不上」：8 秒无进度 / 30 秒硬上限 + **`hopeless()` 没 Wi-Fi 连私有网段立刻判死** |
+| `PocketStatus.kt` | 246 | 从 `pocket.status` RPC 取公网地址；**先剥信封 `result.value`**，嵌套同名键不能冒充顶层 |
+| `AutoFailover.kt` | 121 | 连不上时换哪条：`pickStart()` 没 Wi-Fi 把 LAN 换成 PUBLIC，`next()` 优先换网络类型 |
 | `CookieNames.kt` | 39 | 「删哪类 cookie」的唯一判据（`dsh-auth-*` vs `dsh_pocket_token`） |
 | `WebBridge.kt` | 28 | `@JavascriptInterface` 桥：`keyboardHeight()`（CSS px）、`isNativeShell()` |
 
@@ -87,7 +95,10 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'; $env:ANDROID_HOME='D:\AndroidDev\sdk'; $en
 | `AutoConnectTest` | 7 | lastUsed 优先、无地址宁可停在列表、seed 的 kind 由 URL 推断 |
 | `LanDiscoveryTest` | 29 | 候选地址（钉 /24、排除自己与保留段）、正文判据不依赖响应长度、**免 PIN 只认响应头 `Set-Cookie: dsh-auth-`**、`tokenOf` 不认 fragment、`rebind` 保 scheme 与端口 |
 | `LanAdoptTest` | 18 | 同主机直连 / 免 PIN 电脑直接连 / 单台搬 PIN / **多台一律 AskPin** / 无 PIN 不让连 / 去重 |
-| **合计** | **189** | |
+| `AutoFailoverTest` | 14 | `pickStart` 没 Wi-Fi 时把 LAN 换成 PUBLIC；`next` 优先换网络类型、已试过的不重试 |
+| `ConnectWatchdogTest` | 15 | 8 秒无进度 / 30 秒硬上限；**`hopeless`：没 Wi-Fi 连私有网段立刻判死，公网慢也要等** |
+| `PocketStatusTest` | 17 | **剥 RPC 信封 `result.value`**（夹具是真机原始响应）、嵌套同名键不能冒充顶层、隧道停则不产出地址 |
+| **合计** | **235** | |
 
 **真机 instrumented**：`androidTest/PageProbeJsTest` 7 条，验取值链路在真 WebView 里的行为
 （中文标题含 `·` 往返、`innerText` 跳过 `display:none`、`about:blank` 不崩）。
@@ -107,10 +118,14 @@ lint 当前基线 **0 error / 22 warning**（warnings 不挡合并）。
 
 | 顺序 | 依据 | 用户要做什么 |
 |---|---|---|
-| 1 | 手机里最后使用过的连接 | 什么也不用做 |
+| 1 | 手机里最后使用过的连接（**没 Wi-Fi 时若它是局域网地址，直接换成公网那条**） | 什么也不用做 |
 | 2 | 构建时注入的 `dsh.lanUrl`/`dsh.lanPin`（只在本机自编译时存在） | 什么也不用做 |
 | 3 | **扫同一 Wi-Fi 的 /24 找 dsh-pocket** | 电脑免 PIN 时**什么也不用做，直接进主界面**；要 PIN 时输一次 8 位数字 |
 | 4 | 都不行 → 扫码 / 手输 | 去电脑前扫二维码 |
+
+连上之后还会顺手做一件事：向电脑要一次 `pocket.status`，把**公网隧道地址**存进档案
+（字段在 `result.value` 里，且必须带 `dsh-auth-*` cookie）。所以只要在家连过成功一次，
+出门只插流量也能自己挑到公网那条 —— 不必再手抄地址。
 
 扫到之后分两种情况：
 
@@ -137,6 +152,11 @@ lint 当前基线 **0 error / 22 warning**（warnings 不挡合并）。
   只有「唯一一台答话」且「有带 PIN 的旧档案」时才把 PIN 搬到新 IP。
 - **走流量时不扫**：只在 `wlan/ap/eth/rndis` 这类接口上取本机地址，
   扫运营商 NAT 段白等两秒，一台电脑都不会有。
+- **连不上必须有出口**：没 Wi-Fi 连私有网段**立刻**判死（`ConnectWatchdog.hopeless`），
+  其余情况 8 秒无进度 / 30 秒硬上限；判死后先自动换下一条（`AutoFailover.next`，优先换网络类型），
+  换不到才回落列表页并说清「为什么」—— 绝不留一块纯黑屏。
+- **公网地址用 `pocket.status` 自动取**，别让人手抄：输入法的「智能标点」会把
+  `:` `-` `.` `?` 换成全角，地址当场失效。
 
 ## 内置地址怎么配（不再硬编码）
 
@@ -221,6 +241,10 @@ App 的处理（`RecoveryPlanner` + `HandshakeHealGate`）：
 15. **「装完就能连」不能靠服务发现。** dsh-pocket 服务端 `lib` 下所有 js 里 `mdns|bonjour|discovery|broadcast|multicast|ssdp` **零命中**，它既不广播也不响应发现，手机侧只能自己扫 /24。三条实测结论：① 254 个地址、并发 48、TCP 超时 300ms，**1.86 秒**扫完；② **不能拿响应长度当指纹** —— 同一个「访问验证」页实测出现过 4210 B 与 3969 B 两种长度，判据只能是正文含 `DSH Pocket`；③ PIN 是 dsh-pocket **进程级**的钥匙（`~/.dsh/dsh-pocket/token-lan`），未认证时读不到，所以扫描能解决「电脑在哪」但解决不了「PIN 是多少」。详见 `AGENTS.md` §6.31。
 16. **让「装完直接进主界面」不能靠编 PIN，只能靠电脑侧放行。** 全新安装时手机里没有 PIN，也没有接口能读到它；把 PIN 编进公开仓库的 Release 包等于把钥匙发给每个下载的人。唯一干净的做法是电脑侧关掉 `lanAuthEnabled`（dsh-pocket 官方开关，`lib/index.js:336-339` 的 `isProtected` 对局域网返回它；公网永远要 PIN），App 扫到「裸 GET 就下发 `Set-Cookie: dsh-auth-`」的电脑就直接进主界面。代价是同一 Wi-Fi 内任何设备免密可见会话与文件。详见 `AGENTS.md` §6.32。
 17. **「更新后连不上」先查 Windows 的网络类别，不是 App 的问题。** 电脑把 WLAN 判成 `NetworkCategory=Public` 时，Windows 默认**挡掉全部入站**，手机 `ping 192.168.50.58` 就是 100% 丢包、`nc -z … 3081` 也失败 —— 看起来像「隧道坏了」。判据是 `Get-NetConnectionProfile` 那一行；`Set-NetConnectionProfile -InterfaceAlias "WLAN" -NetworkCategory Private`（需管理员）之后立刻 `0% packet loss`。注意 `Get-NetFirewallRule -DisplayName 'DSH Pocket*'` 可能一直是空的：通的是 Private 的默认放行，不是我们加过规则。
+18. **`pocket.status` 的字段在 `result.value` 里，不在顶层。** 真实响应是 `{"type":"server-response","rpcId":"r1","result":{"ok":true,"value":{…字段…}}}`。第一版按顶层取键，永远拿不到 `tunnelUrl`，日志只有一句 `pocket.status: no usable public address` —— **看着像「隧道没开」，其实隧道好着**。而且这条 RPC **必须带 cookie**（裸 POST 恒 `401 unauthorized`），cookie 就是 WebView 里已下发的 `dsh-auth-*`；**不能用页面里的 `fetch`** 去调，`evaluateJavascript` 的回调不 await Promise，拿到的是 `{}`。
+19. **「没 Wi-Fi 却去连私有网段」是确定不通，别等进度条说话。** 私网地址的 SYN 会被静默丢弃（不回 RST），`onReceivedError` 与 `onPageFinished` **一次都不触发**，WebView 就停在一块纯黑 `#151517` 上。更坑的是实测这条路上 `maxProgress` 竟然到过 **10**（页面自己画了点东西），于是「一点进度都没走」那条判据不触发，**白等满 30 秒**才回落。现在 `ConnectWatchdog.hopeless(url, onLan)` 单独判这一条：没 Wi-Fi + 私有网段 = 立刻判死。判据用「有没有 Wi-Fi」（本地信息，立刻答），不是「局域网连不连得上」（要真拨一次才知道，那正是要避免的等待）。
+20. **换下一条地址时要优先换网络类型，不是换最近用的。** 出门时 `lastUsed` 必然还是在家那条局域网地址，不换就天天先花一轮去等一个注定不通的地址；而同一个网络类型的另一条，失败原因大概率一样，试它只是多等一轮。另外存公网档案时**不要把 `lastUsedAt` 设成当前时间**（置 0），否则在家连一次局域网，下次冷启动就被莫名改走公网绕远路。
+21. **别让人手输地址 —— 输入法会把它改成全角。** 真机上 `adb shell input text` 打公网地址，被讯飞/搜狗的「智能标点」改成 `https：//xxx－yyy。trycloudflare。com/？token=…`（`:`→`：`、`-`→`－`、`.`→`。`、`?`→`？`），地址直接失效。能自动抓就别让人输；真要手输，`input text` 之后必须回读 EditText 校验。
 
 ## 构建
 
@@ -379,9 +403,10 @@ node tools\publish-release.cjs --no-bump        # 打 tag 并推送
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | `tests=189 failures=0 errors=0 skipped=0`（12 个测试类） |
-| APK | `app-debug.apk` 7,312,868 B / `app-release.apk` 1,930,946 B（0.4.0 发版产物 1,930,950 B） |
+| 单元测试 | `tests=235 failures=0 errors=0 skipped=0`（15 个测试类） |
+| APK | `app-debug.apk` 7,312,868 B / `app-release.apk` **1,947,334 B**（0.4.0 发版产物 1,930,950 B） |
 | 装完直进 | release 包全新安装清数据后冷启动 `TotalTime: 313`，直接落 DSH 主界面，无 PIN 屏（`build-artifacts/v05-rel-first.png`） |
+| **只走 4G** | **关 Wi-Fi（只剩 `ccmni1 10.66.64.247/8`）冷启动 `TotalTime: 286`，`pocket.status: saved public address …trycloudflare.com` 后直进主界面** |
 | Release | `v0.4.0` 已发布，固定地址 `200` / 1,930,950 B，SHA-256 `8d791d29…68abd`，与 `SHA256SUMS.txt` 一致 |
 | 返回互逆 | `tools/verify-back-layers.cjs` 7 场景全过（面板 / 菜单 / 抽屉 / 会话 / 功能视图 / 首页各按一次只退一层） |
 | 真机 instrumented | `PageProbeJsTest` 7 条 `OK (7 tests)`（`8PCE7LJB99VG7TRO`，Android 15） |
@@ -454,6 +479,7 @@ CDP 转发要点：`cat /proc/net/unix | grep webview_devtools_remote` 会返回
 ## 待办（下一档 B）
 
 已完成、不再列在这里的：局域网自动发现（第 22 步）、免 PIN 直进主界面（第 23 步）、
+**出门只插流量也能连（第 24 步，含公网地址自动读回）**、
 release 签名与 GitHub Release 通道（第 21 步）、返回与进入严格互逆（第 19 步）。
 
 剩下的：
@@ -461,7 +487,6 @@ release 签名与 GitHub Release 通道（第 21 步）、返回与进入严格�
 - `androidTest` 覆盖仍不全：cookie 清除→重导航、键盘 insets、扫码链路只有手跑脚本
   （同域判定已在第 14 步补成 17 条 JVM 单测）
 - `MainActivity` 仍有 1000+ 行：`buildUi()` 里造 UI 的代码最长，可拆 `HomeView` / `WebPanel`
-- 隧道地址自动读回（quick tunnel 每次变，现在要手动重扫；走 dsh-pocket 的 `pocket.status` RPC）
 - 前台服务保活（现在靠 `svc power stayon true`，不该长期开）
 - 任务完成通知（DSH 的 SSE 完成事件）
 - 文件/拍照附件通道

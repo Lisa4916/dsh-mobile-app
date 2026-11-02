@@ -112,7 +112,7 @@ class LanDiscoveryTest {
 
     @Test
     fun tokenOf_readsTokenFromQuery() {
-        assertEquals("60111186", LanScan.tokenOf("http://192.168.50.58:3081/?token=60111186"))
+        assertEquals("12345678", LanScan.tokenOf("http://192.168.50.58:3081/?token=12345678"))
         assertEquals("abc", LanScan.tokenOf("http://h/?token=abc"))
         assertEquals("abc", LanScan.tokenOf("http://h/?a=1&token=abc&b=2"))
     }
@@ -140,7 +140,7 @@ class LanDiscoveryTest {
 
     @Test
     fun tokenOf_doesNotConfuseSimilarNames() {
-        assertNull(LanScan.tokenOf("http://h/?token-lan=60111186"))
+        assertNull(LanScan.tokenOf("http://h/?token-lan=12345678"))
         assertNull(LanScan.tokenOf("http://h/?mytoken=1"))
     }
 
@@ -151,10 +151,10 @@ class LanDiscoveryTest {
         val old = Endpoint(
             id = "x",
             label = "192.168.50.58",
-            url = "http://192.168.50.58:3081/?token=60111186",
+            url = "http://192.168.50.58:3081/?token=12345678",
         )
         val fresh = LanScan.rebind(old, "192.168.50.77")
-        assertEquals("http://192.168.50.77:3081/?token=60111186", fresh?.url)
+        assertEquals("http://192.168.50.77:3081/?token=12345678", fresh?.url)
         assertEquals("192.168.50.77", fresh?.label)
         assertEquals(Endpoint.Kind.LAN, fresh?.kind)
     }

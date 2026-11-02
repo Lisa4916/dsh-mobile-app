@@ -104,6 +104,38 @@ class MainActivity : AppCompatActivity() {
      */
     private var healthRecheck: Runnable? = null
 
+    /**
+     * 本次加载的守望任务（见 [ConnectWatchdog]）。
+     *
+     * 为什么必须有：内网地址在不匹配的网络里会被**静默丢弃**（不回 RST），
+     * `onReceivedError` / `onPageFinished` 一个都不触发，界面就永远停在
+     * WebView 的底色 `#151517` 上——纯粹的黑屏，没有任何出口。
+     * 真机实测 90 秒仍然全黑、0 个文本节点。
+     */
+    private var connectWatchdog: Runnable? = null
+
+    /** 本次加载开始的时间点（`SystemClock.elapsedRealtime()`），给守望任务算用时。 */
+    private var connectStartedAt: Long = 0L
+
+    /** 本次加载达到过的**最大**进度。用最大值而不是当前值，见 [ConnectWatchdog] 类注释。 */
+    private var connectMaxProgress: Int = 0
+
+    /**
+     * 公网地址只问一次。
+     *
+     * 页面每次路由跳转都会走 `onPageFinished`，不加门禁就变成一遍遍 POST 状态 RPC。
+     * 每次连接（[connect]）重置。
+     */
+    private var pocketStatusAsked: Boolean = false
+
+    /**
+     * 本次启动已经试过的连接 id（[AutoFailover] 的输入）。
+     *
+     * 为什么要有：两条档案都不通时，没有它就会在它们之间来回跳，
+     * 用户看到的是「一直在换、一直进不去」。只有用户主动再点一次才清空。
+     */
+    private var triedIds: Set<String> = emptySet()
+
     /** 最近一次 IME insets 报告的键盘高度（px），供 WebBridge 查询。 */
     internal var currentKeyboardHeight: Int = 0
 
@@ -183,6 +215,15 @@ class MainActivity : AppCompatActivity() {
      * 但此时用户只需要输 8 位数字，不必再去电脑前扫二维码。
      */
     private fun autoconnect() {
+        // 先按「当前有没有 Wi-Fi」挑一条：出门只剩流量时不要先去等那个只在
+        // 局域网里才通的地址（这台手机长期只插流量卡，天天都会走到这一步）。
+        val onLan = LanScan.localLanIpv4() != null
+        val preferred = AutoFailover.pickStart(connections.all(), connections.lastUsed(), onLan)
+        if (preferred != null) {
+            triedIds = setOf(preferred.id)
+            connect(preferred, persist = false)
+            return
+        }
         when (val plan = AutoConnect.decide(connections.lastUsed(), DEFAULT_LAN_URL, System.currentTimeMillis())) {
             is AutoConnectPlan.Connect -> connect(plan.endpoint, persist = false)
             is AutoConnectPlan.Seed -> {
@@ -663,7 +704,12 @@ class MainActivity : AppCompatActivity() {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(2), dp(10), dp(2), dp(10))
                 isClickable = true
-                setOnClickListener { connect(e, persist = true) }
+                setOnClickListener {
+                    // 用户主动点某一条 = 重新开始一轮尝试，把「已试过」清掉，
+                    // 否则点哪条都会被 failover 的旧记录挡着。
+                    triedIds = emptySet()
+                    connect(e, persist = true)
+                }
             }
             // 标题行：名字 + 落点标签。标签不是装饰 —— 列表里同时存在局域网与公网
             // 两条入口指向同一台电脑时，用户得能一眼分出「哪条在家里用、哪条在外面用」。
@@ -762,6 +808,7 @@ class MainActivity : AppCompatActivity() {
         val id = EndpointStore.idFor(label, url)
         val ep = Endpoint(id, label, url, System.currentTimeMillis())
         applyList(connections.upsert(ep))
+        triedIds = emptySet()
         connect(ep, persist = false)
     }
 
@@ -778,10 +825,71 @@ class MainActivity : AppCompatActivity() {
         progress.visibility = View.VISIBLE
         progress.progress = 0
         applyBarIconTheme(darkBackground = true)
+        startConnectWatchdog()
         webView.loadUrl(endpoint.url)
     }
 
+    /**
+     * 起一次「这次到底连不连得上」的守望。
+     *
+     * 为什么不能只靠 `onReceivedError`：内网地址在不匹配的网络里被静默丢包时，
+     * 那个回调**一次都不来**（实测 90 秒无任何 `net::` 日志），页面就死在黑屏上。
+     * 这里用定时采样兜住它，判定逻辑在 [ConnectWatchdog] 里（纯 JVM，可单测）。
+     */
+    private fun startConnectWatchdog() {
+        cancelConnectWatchdog()
+        connectStartedAt = android.os.SystemClock.elapsedRealtime()
+        connectMaxProgress = 0
+        pocketStatusAsked = false
+        val tick = object : Runnable {
+            override fun run() {
+                if (!this@MainActivity::webView.isInitialized) return
+                if (webView.visibility != View.VISIBLE) return
+                val elapsed = android.os.SystemClock.elapsedRealtime() - connectStartedAt
+                // 「没连 Wi-Fi 却去连私有网段地址」是**确定不通**，不必等进度条说话。
+                // 实测（2026-11-03，只插 4G）这条路上 maxProgress 竟然到过 10，
+                // 8 秒那条判据不触发，一路白等 30 秒才回落。
+                val hopeless = ConnectWatchdog.hopeless(current?.url, LanScan.localLanIpv4() != null)
+                if (!hopeless &&
+                    ConnectWatchdog.verdict(elapsed, connectMaxProgress) == ConnectWatchdog.Verdict.KEEP_WAITING
+                ) {
+                    webView.postDelayed(this, WATCHDOG_TICK_MS)
+                    return
+                }
+                connectWatchdog = null
+                val target = current
+                android.util.Log.w(
+                    "DshRemote",
+                    "connect gave up after ${elapsed}ms, maxProgress=$connectMaxProgress, " +
+                        "hopeless=$hopeless, url=${target?.url}",
+                )
+                // 先试着换一条别的档案（出门时局域网换公网这个场景全靠它），
+                // 换不到才回落列表页并说明原因。
+                val next = AutoFailover.next(store.all(), target, triedIds)
+                if (next != null) {
+                    triedIds = triedIds + next.id
+                    android.util.Log.i("DshRemote", "connect failover -> ${next.url}")
+                    toast("这台连不上，换一条试试")
+                    connect(next, persist = true)
+                    return
+                }
+                toast(ConnectWatchdog.giveUpMessage(target?.url))
+                // 顺序同 onPageError：先离开当前页，再切列表，否则空白页会在可见状态下闪一下。
+                webView.loadUrl(BLANK_PAGE)
+                showList()
+            }
+        }
+        connectWatchdog = tick
+        webView.postDelayed(tick, WATCHDOG_TICK_MS)
+    }
+
+    private fun cancelConnectWatchdog() {
+        connectWatchdog?.let { if (this::webView.isInitialized) webView.removeCallbacks(it) }
+        connectWatchdog = null
+    }
+
     private fun showList() {
+        cancelConnectWatchdog()
         webView.visibility = View.GONE
         listRoot.visibility = View.VISIBLE
         progress.visibility = View.GONE
@@ -857,8 +965,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     internal fun onPageFinished(url: String?) {
+        cancelConnectWatchdog()
         progress.visibility = View.GONE
         healHandshakeIfNeeded()
+        maybeCapturePublicAddress()
         // 复查一次：探测可能被「刚动过手」的静默期挡掉（页面还在过渡稿），
         // 这时代码就再也收不到「已恢复」的信号，闸门会一直以为还在同一轮故障里。
         // 延迟到静默期之后再探一次，保证健康状态一定能被记录。
@@ -874,6 +984,93 @@ class MainActivity : AppCompatActivity() {
             }
             healthRecheck = recheck
             webView.postDelayed(recheck, HandshakeHealGate.PROBE_QUIET_AFTER_ACT_MS + 200L)
+        }
+    }
+
+    /**
+     * 顺手把「出门也能用」的公网地址存下来。
+     *
+     * 病灶：手机侧过去只认识扫网段扫出来的局域网地址，所以**一离开家就必然连不上**。
+     * 这台手机的实际情况就是长期只插流量卡（实测 `ip -4 addr` 只有 `ccmni1`，没有 `wlan0`），
+     * 于是「远程连接」这件事从来没成立过。
+     *
+     * dsh-pocket 自己的状态 RPC（`/dsh-pocket/pocket.status`）里就带着公网隧道地址。
+     * 这里**不用页面里的 fetch**：`evaluateJavascript` 的回调不会 await Promise，
+     * 拿到的是 `{}`；改为在原生侧发同一个请求，并把 WebView 已经拿到的
+     * `dsh-auth-*` cookie 原样带上 —— 等价于「以页面身份问一次」，但结果是同步可读的。
+     *
+     * 三条约束：
+     * 1. **一次连接只问一次**（[pocketStatusAsked]），页面每次路由跳转都会 `onPageFinished`，
+     *    不做门禁会变成刷屏式请求；
+     * 2. 解析与取舍全在 [PocketStatus] 里（纯 JVM、有单测），这里只负责发请求与落库；
+     * 3. 拿不到就安静地什么都不做 —— 这只是「多一条更好用的地址」，失败不该打扰用户。
+     */
+    private fun maybeCapturePublicAddress() {
+        if (pocketStatusAsked) return
+        pocketStatusAsked = true
+        val from = current ?: return
+        val base = originOf(from.url) ?: return
+        Thread({
+            val body = postPocketStatus(base)
+            val endpoint = PocketStatus.publicEndpoint(body, System.currentTimeMillis())
+            if (endpoint == null) {
+                android.util.Log.i("DshRemote", "pocket.status: no usable public address")
+                return@Thread
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                val existed = connections.all().any { it.id == endpoint.id }
+                // 存进去但不动 lastUsedAt：用户这次连的是局域网，不该让下次冷启动
+                // 突然改成走公网（公网多一跳、更慢，而且隧道地址会变）。
+                store.upsert(endpoint)
+                if (!existed) {
+                    applyList(store.all())
+                    android.util.Log.i("DshRemote", "pocket.status: saved public address ${endpoint.host}")
+                }
+            }
+        }, "dsh-pocket-status").start()
+    }
+
+    /** `https://a.b:8443/x?y` → `https://a.b:8443`；解析不出就 null。 */
+    private fun originOf(url: String?): String? {
+        if (url == null) return null
+        if (Endpoint.parseUri(url) == null) return null
+        val host = Endpoint.hostOf(url) ?: return null
+        val scheme = LanScan.schemeOf(url)
+        val port = LanScan.portOf(url)
+        return if (port == null) "$scheme://$host" else "$scheme://$host:$port"
+    }
+
+    /**
+     * 以当前页面身份问一次 dsh-pocket 状态。失败一律返回 null（不抛）。
+     *
+     * 注意 cookie 必须从 [CookieManager] 取**当前地址**那一份：dsh-pocket 的
+     * `dsh-auth-*` 是按域名/端口下发的，拿错域名就是 401（实测裸调恒 `unauthorized`）。
+     */
+    private fun postPocketStatus(base: String): String? {
+        var conn: java.net.HttpURLConnection? = null
+        return try {
+            val cookie = CookieManager.getInstance().getCookie(base).orEmpty()
+            conn = (java.net.URL(base + PocketStatus.RPC_PATH).openConnection() as java.net.HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 4_000
+                readTimeout = 4_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                if (cookie.isNotEmpty()) setRequestProperty("Cookie", cookie)
+            }
+            val payload = """{"rpcId":"1","method":"pocket.status"}"""
+            conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+            if (conn.responseCode !in 200..299) {
+                android.util.Log.i("DshRemote", "pocket.status http ${conn.responseCode}")
+                return null
+            }
+            conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } catch (e: Exception) {
+            android.util.Log.i("DshRemote", "pocket.status failed: ${e.javaClass.simpleName}")
+            null
+        } finally {
+            conn?.disconnect()
         }
     }
 
@@ -975,6 +1172,7 @@ class MainActivity : AppCompatActivity() {
 
     internal fun onProgress(p: Int) {
         progress.progress = p
+        if (p > connectMaxProgress) connectMaxProgress = p
         if (p >= 100) progress.visibility = View.GONE
     }
 
@@ -1146,6 +1344,7 @@ class MainActivity : AppCompatActivity() {
             // 不取消就会在已销毁的 WebView 上跑（`isFinishing` 只是兜底，不是取消）。
             healthRecheck?.let { webView.removeCallbacks(it) }
             healthRecheck = null
+            cancelConnectWatchdog()
             // 顺序有讲究：先把 WebView 从视图树摘掉，再断开所有指向本 Activity 的引用，
             // 最后才 destroy。少做一步都会让 Activity 在配置变更（旋转）后被 WebView
             // 的 client / JS 接口悄悄持有，表现为「转屏几次后内存持续上涨」。
@@ -1239,6 +1438,14 @@ class MainActivity : AppCompatActivity() {
          * 被 MIUI 拒绝注入造成的假阴性，详见 [onPageError] 的说明。
          */
         const val BLANK_PAGE = "about:blank"
+
+        /**
+         * 连接守望的采样间隔。
+         *
+         * 500ms 是权衡：更密没有意义（判据是秒级的），更稀会让「连不上」的提示晚到。
+         * 一次加载最多 60 次回调，代价可以忽略。
+         */
+        const val WATCHDOG_TICK_MS = 500L
     }
 }
 

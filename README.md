@@ -9,6 +9,8 @@
 
 入口类型由 App 自动判断并标注（局域网 / 公网 / 本机），公网快速隧道地址会提示「每次重开都会变」。
 
+**分发**：发给另一台手机不用连线，走 	ools\publish-apk.cjs + 局域网下载页，或者走 GitHub Release（	ools\publish-release.cjs，手机存一个固定网址即可）。见「给第二台手机装机与收更新」。
+
 ## 架构
 
 ```
@@ -219,18 +221,92 @@ node tools\publish-apk.cjs --bump patch   # 版本号 +1，重新构建发布
 
 ### 三条容易踩的前提（都已固化进脚本）
 
-1. **两个包必须是同一张证书。** `app/build.gradle.kts` 的 `releaseLocal` 用的是
-   `~/.android/debug.keystore`，所以 debug 包与 release 包能互相覆盖（实测两个
-   `apksigner verify --print-certs` 都是 `SHA-256 ca77c1d1…`）。哪天换成自己的 keystore，
-   **已经装在手机上的包就再也覆盖不上了**，只能卸载重装。
+1. **同一个包名只能用同一张证书。** release 现在用 `release/dsh-remote.jks`
+   （`CN=DSH Remote`，`SHA-256 12912cf9…`），在 `local.properties` 里配好就会自动用它。
+   **换证书 = 手机上那个包再也覆盖不上**，只能卸载重装（连接列表跟着丢）。
+   keystore 与密码在 `release/` 下，已 gitignore —— **务必自己备份一份**，
+   丢了就再也发不出能覆盖安装的包。
 2. **versionCode 只能升不能降。** 现在由 `version.properties` 显式管理——**不要改成 git 提交数**，
    CI 是浅克隆会算成 1，打出来的包比手机上装的还旧，只能卸载。
 3. **装 release 而不是 debug。** debug 包体积 7.3 MB（release 1.8 MB）、带 `debuggable`、
    开着 WebView 调试。日常用 release，只有要抓 CDP 时才临时装 debug。
 
-> `dist/` 已 gitignore（里面是二进制产物与清单）。分发页只服务局域网，没有鉴权，
+> `dist/` 与 `release/` 都已 gitignore。分发页只服务局域网，没有鉴权，
 > 别把这个端口转到公网 —— 里面虽然不含 PIN（PIN 存在每台手机自己的 SharedPreferences 里），
 > 但没必要对外暴露你的构建。
+
+## 用 GitHub Release 发版（手机不用连电脑）
+
+上面那套要求电脑开着、两台设备同一 Wi-Fi。走 GitHub 之后，手机只需要**一个固定网址**：
+
+```
+https://github.com/<owner>/<repo>/releases/latest/download/dsh-remote-latest.apk
+```
+
+这个地址永远指向最新一个 Release 的同名 asset。存成手机浏览器书签，
+以后电脑这边推一个 tag，手机上刷新就是新版。
+
+### 一次性准备
+
+**1. 在 GitHub 建一个空仓库**（private 也可以），然后：
+
+```powershell
+cd D:\dsh-mobile-app
+& 'C:\Program Files\Git\cmd\git.exe' remote add origin https://github.com/<你>/<仓库>.git
+& 'C:\Program Files\Git\cmd\git.exe' push -u origin master
+```
+
+**2. 把签名材料加到仓库的 Actions secrets**（Settings → Secrets and variables → Actions → New repository secret）。
+需要四个，名字必须完全一致：
+
+| Secret | 值 | 从哪来 |
+|---|---|---|
+| `KEYSTORE_BASE64` | keystore 文件的 base64 | `release/keystore.b64` 的全文（一行，别换行） |
+| `KEYSTORE_PASSWORD` | keystore 口令 | `release/password.txt` |
+| `KEY_ALIAS` | `dsh-remote` | 固定 |
+| `KEY_PASSWORD` | 与 keystore 口令相同 | `release/password.txt` |
+
+生成 base64 的命令（会直接写进 `release/keystore.b64`）：
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes('D:\dsh-mobile-app\release\dsh-remote.jks')) |
+    Set-Content D:\dsh-mobile-app\release\keystore.b64 -Encoding ascii -NoNewline
+```
+
+> 这一步在 GitHub 网页上做，`gh` CLI 也行。**别把 keystore 或密码提交进仓库** ——
+> 拿到了就能签一个同证书的包覆盖安装到你手机上。
+
+**3. 打开 Actions**：仓库的 Actions 页面首次会要求允许 workflow，点一下即可。
+
+### 每次发版
+
+```powershell
+cd D:\dsh-mobile-app
+node tools\publish-release.cjs --bump patch     # 版本 +1 并提示你先提交
+& 'C:\Program Files\Git\cmd\git.exe' add -A
+& 'C:\Program Files\Git\cmd\git.exe' commit -m "chore(release): 版本升到 0.2.1"
+node tools\publish-release.cjs --no-bump        # 打 tag 并推送
+```
+
+第二条命令（`publish-release.cjs --no-bump`）推的是 **tag**，不推代码 ——
+所以 tag 一定对应一个已经提交的状态，事后能回答「这个版本到底是哪份代码」。
+
+推送后 [release.yml](.github/workflows/release.yml) 会：
+校验 tag 与 `version.properties` 是否一致（不一致直接失败）→ 用 secrets 签 release 包 →
+`apksigner verify` 复核 → 建 Release 并挂上 APK（稳定名 + `dsh-remote-latest.apk` + `SHA256SUMS.txt`）。
+
+### 手机上收更新
+
+浏览器打开那个固定地址 → 下载 → 覆盖安装。**不会丢已保存的连接**。
+
+想确认拿到的是哪一版：Release 标题就是 `DSH 手机遥控 0.2.1`，
+或打开 `https://github.com/<owner>/<repo>/releases/latest` 看正文里的版本号与 SHA-256。
+
+### 两条边界
+
+- **公开仓库要注意**：Release 的 asset 是公开可下的（private 仓库的 Release 也要登录才能下）。
+  这个包里不含 PIN，但含你的包名与签名 —— 不想公开就把仓库设成 private。
+- **Release 只发 release 包**，不带 `debuggable`。要抓 CDP 调试还是本机 `adb install` debug 包。
 
 ## 验证证据
 
@@ -282,6 +358,7 @@ node tools\publish-apk.cjs --bump patch   # 版本号 +1，重新构建发布
 | `verify-back-layers.cjs` | 7 个场景各按一次真实返回键，断言「只退一层」。**「返回是否与进入互逆」的唯一判据** |
 | `publish-apk.cjs` | 构建 release 并发布到 `dist/`（APK + `latest.json` + 自包含下载页）；`--bump patch` 先把版本号 +1 |
 | `serve-apk.cjs` | 把 `dist/` 发布成局域网下载页（默认 8123），另一台手机浏览器打开即可装机与收更新 |
+| `publish-release.cjs` | `node tools/publish-release.cjs --bump patch` 升版本并提示提交；`--no-bump` 打 tag 并推送，触发 `release.yml` 建 GitHub Release |
 
 `_` 前缀的是早期一次性探针（`_probe-cur.cjs`、`_probe-page.cjs`、`_probe-storage.cjs`、`_tabs.cjs`、`_test-reset.cjs`），留作参考，不进主流程。
 

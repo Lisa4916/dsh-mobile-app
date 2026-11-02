@@ -640,6 +640,42 @@ release 1.8 MB、R8 过一遍。日常用 release，只有抓 CDP 时才临时�
 （`42db6a9bfbe18e053f354cbaac05e9f0294d5012bf5cb1281ceb2a8bdac2048f`），
 `adb install -r` 覆盖安装 `Success`，`aapt2 dump badging` 显示 `versionCode='2' versionName='0.2.0'`。
 
+### 6.30 GitHub Release 发版：手机只认一个固定网址
+
+`serve-apk.cjs` 那套要求电脑开着、同一 Wi-Fi。给「另一台日常用的手机」更省事的是
+GitHub Release —— 手机存一个书签，永远下最新：
+
+```
+https://github.com/<owner>/<repo>/releases/latest/download/dsh-remote-latest.apk
+```
+
+`latest/download/<固定文件名>` 是 GitHub 的稳定重定向：**asset 名必须保持
+`dsh-remote-latest.apk` 不变**。换了名字这个链接就 404，而手机上表现成「下载失败」，
+没人会想到是名字改了。
+
+流水线：`node tools/publish-release.cjs --bump patch` 升版本 → 手动提交 version.properties →
+`node tools/publish-release.cjs --no-bump` 打 tag 并推送 → [release.yml](.github/workflows/release.yml) 构建发布。
+
+**release.yml 里三条不可省的检查**（缺任何一条都会产出「看起来成功、装上却不对」的包）：
+
+1. **tag 必须等于 `v` + `versionName`**。否则 Release 页写 v0.2.1、包里是 0.2.0，
+   而 Android 只认 versionCode，出问题时靠版本号对不上号。
+2. **四个签名 secret 缺一个就 fail**（`KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD`）。
+   缺了 `build.gradle.kts` 会**静默回落**到 debug keystore，而 runner 上根本没生成过
+   `~/.android/debug.keystore`，最后只产出 `app-release-unsigned.apk`。
+3. **`apksigner verify --print-certs` 必须过**，并且要检查产物存在。
+   AGP 在签不出来时**不报错**，只是把产物改名成 `-unsigned`。
+
+签名材料：`release/dsh-remote.jks`（`CN=DSH Remote`，RSA 4096，10000 天）。
+`local.properties` 里配 `dsh.releaseStoreFile` 等四项后本机也用它；CI 用 secrets 里的同一份。
+**`release/` 已 gitignore，必须自己另存一份备份** —— 丢了就再也发不出能覆盖装到现有手机的包。
+
+实测（2026-11-02）：新 keystore 构建后
+`apksigner verify --print-certs` → `V2 Signer: certificate DN: CN=DSH Remote, OU=Personal, O=Personal, L=Local, C=CN`，
+`SHA-256 12912cf905c2691dbf9d97e72a4e7322c61f1c1dad10b5385f2a65e9d08532b0`。
+**注意这意味着 debug 包与 release 包不再能互相覆盖** —— 手机上若还装着旧 debug 证书的版本，
+换到新证书的 release 必须先卸载一次。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）
@@ -677,6 +713,7 @@ release 1.8 MB、R8 过一遍。日常用 release，只有抓 CDP 时才临时�
 | `verify-back-layers.cjs` | `node verify-back-layers.cjs <cdpPort>`，7 个场景各按一次真实返回键，断言「只退一层」。CDP 转发随 pid 重建、构造步骤带断言，是「返回是否互逆」的唯一判据 |
 | `publish-apk.cjs` | `node tools/publish-apk.cjs [--no-build] [--bump patch / minor / major]`，构建 release 并发布到 `dist/`（APK + `latest.json` + 自包含下载页） |
 | `serve-apk.cjs` | `node tools/serve-apk.cjs [port]`，把 `dist/` 发布成局域网下载页（默认 8123，支持 Range），另一台手机浏览器打开即可装机与收更新 |
+| `publish-release.cjs` | `node tools/publish-release.cjs --bump patch` 升版本并提示提交；`--no-bump` 打 tag 推 origin，触发 `release.yml` 建 GitHub Release（手机用固定地址收更新，见 §6.30） |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 
@@ -795,3 +832,4 @@ lint 基线：**0 error / 20 warning**（`SetTextI18n` 10、`GradleDependency` 3
 其余各 1）。AGP 默认 `abortOnError` 只对 error 生效，所以 warnings 不挡合并。
 第 16 步把 9 条 `UnusedResources` 清零（删掉 XML 侧零引用的 7 个颜色与 2 个字符串），
 现在剩下的 10 条 `SetTextI18n` 是「文案写死在 Kotlin 里」——要收敛成资源是一次独立改造，不是补几行 strings。
+

@@ -33,7 +33,8 @@
 | 17 | 运行态全量功能回归（14 项主流程 + 3 项自愈/兜底） | ✅ | 全部符合设计；另修 2 处工具缺陷（硬编码序列号、依赖残留手势文件） |
 | 18 | 启动时侧栏不再闪：禁掉移动端 frame 侧栏首次就位的 transition | ✅ | 冷启动逐帧采样 `sideL >= -60` 帧数 1 → 0（两轮）；`tests=135`；lint 20 warning |
 | 19 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ | 真机 7 种层叠状态全通过（`tools/verify-back-layers.cjs`）；`tests=142`；lint 0/20 |
-| 20 | 第二台手机装机与收更新：版本号单一来源 + 局域网分发页 | ✅ | 手机侧 curl 下载 1,930,818 B，SHA-256 与清单一致；db install -r Success |
+| 20 | 第二台手机装机与收更新：版本号单一来源 + 局域网分发页 | ✅ | 手机侧 curl 下载 1,930,818 B，SHA-256 与清单一致；`adb install -r Success |
+| 21 | GitHub Release 发版：专用签名密钥 + tag 触发构建 | 🟡 代码就绪，待建仓库并配 4 个 secret | 本机已验证新证书签出的 release 包（`CN=DSH Remote`，SHA-256 `12912cf9…`） |
 
 **测试基线：JVM 单测全量 `tests=142 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
@@ -1124,7 +1125,7 @@ git ls-files -s gradlew      # 100755
 
 ```
 app-release.apk  1,976,330 B      （原 7,485,956 B 的 debug 包）
-apksigner verify → Signer #1 certificate DN: C=US, O=Android, CN=Android Debug
+apksigner verify → V2 Signer: certificate DN: C=US, O=Android, CN=Android Debug
 ```
 
 **关键验证不是「构建过了」，是「R8 之后 App 还能跑」** —— 真机装上 release 包：
@@ -1574,3 +1575,75 @@ node tools\publish-apk.cjs --bump patch
 3. 拿不到 APK 是第三种完全不同的原因 —— 用 `serve-apk.cjs` 给个局域网下载页。
 
 三者都表现为「装不上」，但修法互不相同，排查时先分清是哪一类。
+
+## 第 21 步：GitHub Release 发版通道 🟡
+
+用户：「有 GitHub 账号」—— 要把 §20 那套「电脑必须开着 + 同一 Wi-Fi」换成手机存一个固定网址。
+
+### 21.1 为什么固定网址是这里唯一重要的东西
+
+GitHub 的 `releases/latest/download/<asset 名>` 是**稳定重定向**：永远指向最新一个 Release
+的同名 asset。于是手机上存的是
+
+```
+https://github.com/<owner>/<repo>/releases/latest/download/dsh-remote-latest.apk
+```
+
+这个链接从今往后不变。**asset 名必须一直是 `dsh-remote-latest.apk`** ——
+换名字链接就 404，手机上表现成「下载失败」，而且没人会想到是名字改了。
+
+### 21.2 换掉 debug 证书（这一步不可逆，但必须现在做）
+
+原来 release 用的是 `~/.android/debug.keystore`。它的口令是公开的（`android`），
+任何人都能签一个同证书的包覆盖安装到手机上。走公网分发（GitHub）不能这么干。
+
+新建 `release/dsh-remote.jks`（已 gitignore）：
+
+| 项 | 值 |
+|---|---|
+| 算法 | RSA 4096，SHA384withRSA，有效期 10000 天 |
+| DN | `CN=DSH Remote, OU=Personal, O=Personal, L=Local, C=CN` |
+| alias | `dsh-remote` |
+| 口令 | 24 位随机，写入 `release/password.txt` |
+| SHA-256 | `12912cf905c2691dbf9d97e72a4e7322c61f1c1dad10b5385f2a65e9d08532b0` |
+
+`local.properties` 追加四项（`dsh.releaseStoreFile` / `dsh.releaseStorePassword` /
+`dsh.releaseKeyAlias` / `dsh.releaseKeyPassword`），于是本机 `assembleRelease` 也自动用它。
+实测：`apksigner verify --print-certs` 输出 `V2 Signer: certificate DN: CN=DSH Remote…`。
+
+**代价**：debug 包与 release 包不再能互相覆盖。手机上还装着旧 debug 证书版本的，
+换到新证书的 release 必须先卸载一次（连接列表跟着丢，要重新扫码）。
+
+### 21.3 `.github/workflows/release.yml`
+
+`on.push.tags: ['v*']` + `workflow_dispatch`（手填 tag）。`permissions: contents: write`。
+
+三条**不可省**的检查，每条都对应一个「看起来成功、装上却不对」的失败模式：
+
+| 检查 | 省掉的后果 |
+|---|---|
+| `tag == "v" + versionName` | Release 页写 v0.2.1、包里是 0.2.0；Android 只认 versionCode，事后无法靠版本号对上号 |
+| 四个签名 secret 缺一即 fail | `build.gradle.kts` **静默回落**到 debug keystore，而 runner 上没生成过 `~/.android/debug.keystore`，最后只产出 `app-release-unsigned.apk` |
+| `apksigner verify --print-certs` + 检查产物存在 | AGP 签不出来时**不报错**，只是把产物改名成 `-unsigned` |
+
+还有一个刻意的选择：**CI 上 `dsh.lanUrl`/`dsh.lanPin` 留空**（没有 `local.properties`），
+所以 Release 包不带家里的 IP 与 PIN，一进去要求扫码 —— 这是对的。
+
+### 21.4 `tools/publish-release.cjs`
+
+```
+node tools/publish-release.cjs --bump patch   # 升版本，然后提示你先提交
+node tools/publish-release.cjs --no-bump      # 打 tag 并推送
+```
+
+脚本先查四件事：origin 指向 GitHub、工作区干净、`release/dsh-remote.jks` 存在、tag 没重名。
+**只推 tag 不推代码** —— 发版必须对一个已提交的状态打标，否则「这个 tag 是哪份代码」无法回答。
+**也不替你 commit** —— bump 后的 `version.properties` 要单独提交，脚本只打印该怎么做。
+本机试跑（无 origin）输出预期失败：`error: No such remote 'origin'` → `停：没有配置 origin 远端…`。
+
+### 21.5 现状
+
+代码全部就绪，本机已验证「用新 keystore 签出的 release 包证书正确」。
+剩下的两步只能在 GitHub 网页上做：建空仓库、配 4 个 Actions secret（名称与取值见 README）。
+做完之后 `node tools/publish-release.cjs --no-bump` 就能发版。
+

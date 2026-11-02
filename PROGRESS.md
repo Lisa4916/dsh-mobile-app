@@ -37,7 +37,7 @@
 | 21 | GitHub Release 发版：专用签名密钥 + tag 触发构建 | ✅ | Release `v0.2.0` 已发布；`releases/latest/download/dsh-remote-latest.apk` 实测 302→200、1,930,818 B，SHA-256 与 `SHA256SUMS.txt` 一致 |
 | 22 | 装完就能连：自动扫局域网找电脑，扫到只差 PIN | ✅ | 254 地址并发扫完 1.86 s 命中本机；真机 `lan discovery done, found=1` 已复现；单测 142 → 176 |
 | 23 | 免 PIN 直进主界面：扫描时识别「这台电脑不需要 PIN」 | ✅ | 清数据冷启动 313ms 直接落主界面，无 PIN 屏；单测 176 → 189；Release `v0.4.0` 已发布，固定地址实测 1,930,950 B |
-| 24 | 在外面只插流量也能连：抓公网地址 + 连不上立刻回落 + 没 Wi-Fi 不等局域网 | ✅ | 真机只走 4G 冷启动直进主界面；`pocket.status: saved public address …`；单测 189 → 235 |
+| 24 | 在外面只插流量也能连：抓公网地址 + 连不上立刻回落 + 没 Wi-Fi 不等局域网 | ✅ | 真机只走 4G 冷启动直进主界面；`pocket.status: saved public address …`；单测 189 → 235；Release `v0.5.0` 已发布 |
 
 **测试基线：JVM 单测全量 `tests=235 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `AutoFailoverTest` 14 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 +
@@ -2097,3 +2097,44 @@ CI 最后一个 run completed / **success**。
   三者缺一，出门就得手输。
 - 手输地址链路在真机上**被输入法坑过**：讯飞/搜狗会把手打的 `:` `-` `.` `?` 换成全角
   （`https：//…－…。…/？token=`），地址直接失效。这也是「不要靠手输」的另一个理由。
+
+### 24.7 发版落地（v0.5.0，2026-11-03）
+
+| 项 | 值 |
+|---|---|
+| 提交 | `29e70da` `feat(remote): 出门只插流量也能连，连不上立刻回落而不是黑屏干等` + `5a2d4fa` `chore(release): 版本升到 0.5.0` |
+| 版本 | `versionCode=5` / `versionName=0.5.0` |
+| Release | tag `v0.5.0` → 工作流 `completed/success`；资产 `dsh-remote-0.5.0-5.apk` **1,947,330 B**、`dsh-remote-latest.apk` 同尺寸、`SHA256SUMS.txt` 185 B |
+| 固定地址 | `200` / 1,947,330 B，SHA-256 **`56acf0556b6175b307716fbb4032477251de9b4c711ba4750f8a8a43c8a83c46`**，与 `SHA256SUMS.txt` 逐字节一致 |
+| 签名 | `CN=DSH Remote, OU=Personal, O=Personal, L=Local, C=CN` / `12912cf9…`，与 0.4.0 同一把钥匙，可直接覆盖 |
+
+**真机终验（v0.5.0，Redmi `8PCE7LJB99VG7TRO` / Android 15）**
+
+```
+装前：pm clear com.dsh.remote（模拟全新安装）
+只走移动数据（只剩 ccmni1 10.66.64.247/8）
+冷启动 am start -W → TotalTime: 303
+等 25 秒 → uiautomator 仍是列表页（0 条档案时这是正确行为：没地址可猜）
+```
+
+然后走一遍真实场景：
+
+```
+① 开 Wi-Fi → 手动点「在局域网里找电脑」
+   I DshRemote: lan discovery done, found=1
+   I DshRemote: pocket.status: saved public address <tunnel-b>.trycloudflare.com   ← 公网地址进档案
+② 关 Wi-Fi（只剩 ccmni1）→ am force-stop + am start -W（TotalTime: 310）
+③ 等 40 秒 → uiautomator 0 个文本节点（已在 WebView 里），截图是 DSH 主界面（dsh-purge「用户须知」一次性弹窗）
+```
+
+**注意第 ③ 步屏幕上那层弹窗不是 PIN 屏**：那是网页里 dsh-purge 插件的一次性须知，
+App 的列表页才会渲染原生标题「DSH 手机遥控」。判据：`uiautomator` 里 0 个原生文本节点 = 已在 WebView。
+
+**一个容易误判的地方**：`pm clear` 之后第一次冷启动不会自动连 —— 因为手机里一条档案都没有，
+`AutoFailover.pickStart` 返回 null，落到 `ShowList` 并扫网段（只有 Wi-Fi 时才扫）。
+这是设计：没有任何线索时不该乱猜地址。真实用户不会 `pm clear`，档案一直在。
+
+**这一轮 git 通道**：`github.com:443` 恢复了，但不是 fast-forward —— 远端 master 的 sha 与本地不同
+（之前几次走 API 推送造成的）。`git rev-parse origin/master^{tree}` 与本地 `3beb5ce^{tree}` 都是
+`1e9c7630…`，确认树一致后 `git reset --soft origin/master` 再重放提交，得到 `29e70da`，
+推送 `8a30788..29e70da` 成功。**以后遇到 push 被拒先比 tree，不要急着 pull 生成无意义的合并提交。**

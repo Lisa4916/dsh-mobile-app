@@ -387,9 +387,9 @@ dsh-pocket 设置页路径：`设置 → 手机访问`，公网区块按钮点�
 
 | 项 | 值 |
 |---|---|
-| 公网 URL | `https://producers-discharge-atmosphere-ppc.trycloudflare.com` |
-| 公网 PIN | `75330002`（= `~/.dsh/dsh-pocket/token`） |
-| 本机侧实测 | 未认证 200/4210「访问验证」；`?token=75330002` → 200/499「正在进入」+ 双 Set-Cookie；再 GET / → 200/48062 `DeepSeek Harness` |
+| 公网 URL | `https://<tunnel>.trycloudflare.com` |
+| 公网 PIN | `<PUB_PIN>`（= `~/.dsh/dsh-pocket/token`） |
+| 本机侧实测 | 未认证 200/4210「访问验证」；`?token=<PUB_PIN>` → 200/499「正在进入」+ 双 Set-Cookie；再 GET / → 200/48062 `DeepSeek Harness` |
 
 **注意：quick tunnel 的域名每次重开都变，`tunnel-auto.json` 只记 `{"at":<ts>}` 不记 URL，
 目录里也没有任何文件含 `trycloudflare` 字符串 —— 隧道重开后必须重新从设置页读地址。**
@@ -401,7 +401,7 @@ dsh-pocket 设置页路径：`设置 → 手机访问`，公网区块按钮点�
 
 - **结果：完整主界面**「探索未至之境 预览版 / 默认工作区 / 标准模式 / 描述你想要构建的内容」，
   状态栏 4G、无 Wi-Fi。证据图见 [docs/evidence/step7-public-4g.png](D:\dsh-mobile-app\docs\evidence\step7-public-4g.png)。
-- CDP：`title=DeepSeek Harness`、`url=https://producers-discharge-atmosphere-ppc.trycloudflare.com/`。
+- CDP：`title=DeepSeek Harness`、`url=https://<tunnel>.trycloudflare.com/`。
 - 同一台机器上第二台机（motorola XT2335-3 / `ZY22GHMK5F`）在 4G 下**页面黑屏后从 adb 掉线**，未继续追；
   改用 Redmi `8PCE7LJB99VG7TRO` 一次通过。
 
@@ -412,7 +412,7 @@ cookie domain 从当前页面 origin 现取，否则换公网域名时 `setCooki
 
 ```
 1. https://<host>/
-2. https://<host>/?token=75330002&dsh-pocket-retry=1   ← 自愈重连   ← 带 token
+2. https://<host>/?token=<PUB_PIN>&dsh-pocket-retry=1   ← 自愈重连   ← 带 token
 3. https://<host>/
 FINAL title = DeepSeek Harness
 自愈重连请求出现 = 是 ✅ ；cookie 被重新下发 = 是 ✅
@@ -454,7 +454,7 @@ W InputManager: Input event injection from pid 6369 failed.
 
 | 场景 | 结果 |
 |---|---|
-| 离线启动 → 恢复网络 → 点同一行 | 一次进主界面。Document 请求 2 次：`?token=75330002` → `/`，`title=DeepSeek Harness` |
+| 离线启动 → 恢复网络 → 点同一行 | 一次进主界面。Document 请求 2 次：`?token=<PUB_PIN>` → `/`，`title=DeepSeek Harness` |
 | 主界面正常时断网 → 恢复 | 页面一直是主界面，无需任何操作 |
 | 离线时连点 3 次（每次都报错）→ 恢复 → 点 | 一次进主界面 |
 
@@ -858,7 +858,7 @@ val sameHost = host.endpointHost?.let { url.contains(it, ignoreCase = true) } ?:
 真机复验（在页面里插一个 `<a href="https://example.com/?x=<当前host>">` 再 `.click()`）：
 
 ```
-clicked https://example.com/?x=producers-discharge-atmosphere-ppc.trycloudflare.com
+clicked https://example.com/?x=<tunnel>.trycloudflare.com
 topResumedActivity=ActivityRecord{… u0 com.zui.browser/com.lenovo.browser.LeMainActivity t1545}
 ```
 

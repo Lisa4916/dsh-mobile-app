@@ -38,10 +38,10 @@ class BootstrapUrlTest {
     fun build_acceptsHttpsHostWithScheme() {
         // 用户可能把整条带 scheme 的地址填进 dsh.lanUrl，不能再拼一次 http://
         assertEquals(
-            "https://producers-discharge-atmosphere-ppc.trycloudflare.com/?token=75330002",
+            "https://tunnel-name.trycloudflare.com/?token=87654321",
             BootstrapUrl.build(
-                "https://producers-discharge-atmosphere-ppc.trycloudflare.com",
-                "75330002",
+                "https://tunnel-name.trycloudflare.com",
+                "87654321",
             ),
         )
     }

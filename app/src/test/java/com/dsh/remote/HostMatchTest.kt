@@ -13,7 +13,7 @@ import org.junit.Test
  */
 class HostMatchTest {
 
-    private val host = "producers-discharge-atmosphere-ppc.trycloudflare.com"
+    private val host = "tunnel-name.trycloudflare.com"
 
     // ---------------------------------------------------------------- 应判同域
 

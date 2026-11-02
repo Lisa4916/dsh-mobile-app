@@ -4,8 +4,8 @@ package com.dsh.remote
  * 内置连接地址的拼接逻辑（纯 JDK，可单测）。
  *
  * 起因：内置地址原来是硬编码在 [MainActivity] 里的
- * `http://192.168.50.58:3081/?token=60111186`。两个问题：
- * 1. **PIN 泄漏**：`60111186` 是 dsh-pocket 的局域网访问密码，进仓库就等于公开；
+ * `http://<局域网IP>:3081/?token=<PIN>`。两个问题：
+ * 1. **PIN 泄漏**：地址里的 `token=` 就是 dsh-pocket 的局域网访问密码，进仓库就等于公开；
  * 2. **写死 IP**：换网段、换电脑就报废，用户只能删掉重录。
  *
  * 现在改成构建时注入：`local.properties`（已 gitignore）里填 `dsh.lanUrl` 与 `dsh.lanPin`，

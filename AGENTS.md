@@ -39,7 +39,7 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
-# 构建 + 单测（两条一起跑，基线 tests=135 failures=0）
+# 构建 + 单测（两条一起跑，基线 tests=142 failures=0）
 & 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
     -p 'D:\dsh-mobile-app' :app:assembleDebug :app:testDebugUnitTest --console=plain -q
 
@@ -102,7 +102,8 @@ dsh.lanPin=<token-lan 的内容>
 | 11 | 体检出的四个问题：同域判定 / 状态栏前景 / 文案 / 渲染进程兜底 | ✅ 见 §6.21–§6.23 |
 | 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
 | 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
-| 12 | 体检剩余四项：删无用权限与资源 / release 补齐 / 长按删除加确认 / 收敛 strings 与颜色 | ⏳ |
+| 12 | 体检剩余四项：删无用权限与资源 / release 补齐 / 长按删除加确认 / 收敛 strings 与颜色 | ✅ 第 16 步 |
+| 13 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ 见 §6.28 |
 
 **第 7 项现状（2026-11-02 重测，旧结论已作废）**：`cloudflared.exe` 在
 `C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B，2026.10.7）。
@@ -565,6 +566,42 @@ const DEV = resolveSerial(process.env.DEV_SERIAL);   // 参数 > DEV_SERIAL > �
 验证：`node tools/probe-startup.cjs 9222 14000 40`，判据是 `sideL >= -60` 的帧数为 0。
 修复前 1 帧，修复后连跑两轮都是 0。
 
+### 6.28 返回键必须「一次只退一层」，页面有七层
+
+用户口径：`返回与进入严格互逆，不能缺少步骤也不能多，无论进入哪个功能项都如此`。
+
+七层与判据（**顺序即层级，不许改**，`WebViewFactory.DSH_LOCATION_JS`）：
+
+| 层 | 判据 | 退法 |
+|---|---|---|
+| `panel` | 可见的「关闭xxx」`button`/`[role=button]` | `DSH_CLOSE_PANEL_JS` 点它 |
+| `overlay` | 可见的 `[role=menu]/[role=listbox]/[role=dialog]` | `DSH_PRESS_ESCAPE_JS` |
+| `sidebar` | `[class*="_sidebarCol"]` 的 `left > -40`（收起 -209 / 展开 0） | `DSH_PRESS_ESCAPE_JS` |
+| `session` | 正文同时含「对话」与「轨迹」 | `DSH_GO_HOME_JS` |
+| `feature` | `[aria-current]` 或 `[aria-selected=true]` 且文案非「新会话」 | `DSH_GO_HOME_JS` |
+| `home` | `探索未至之境` / `描述你想要构建的内容` / `发消息或创建任务` / `选择一个工作区开始` | **`finish()`** |
+| `other` | 其它 | 退过就 `finish()`，没退过先回首页 |
+
+五条铁律：
+
+1. **`session` 必须排在 `feature` 之前** —— 会话页也有 `aria-selected="true"`（「对话」那个 tab），
+   先判 feature 会把会话页误认成功能视图（首轮就这么判错过）。
+2. **只有 `home` 才退出 App**。旧版把「首页 + 侧栏展开」直接退出（实测 `topResumedActivity` 变 launcher），
+   就是典型的多退一层。
+3. **`Escape` 管不了 panel 和 session** —— 实测 `layerN 0→2→2` 与 `tabs` 不变，这两层必须我们动手。
+4. **`DSH_GO_HOME_JS` 不用改** —— 上一版担心「侧栏已收起时点不到新会话」，第 18 步已实测
+   屏外元素 `click()` 照样生效（§6.20）。
+5. **`visible(el)` 四判缺一不可**：`display!=='none' && visibility!=='hidden' && opacity>=0.05 && r.width>8 && r.height>8`。
+   少判一个就会把 `opacity:0` 的隐藏浮层当成还开着，返回键连按两次都没反应。
+
+验证：`node tools/verify-back-layers.cjs 9222`，7 个场景全过才算通过。**这个脚本自己踩过四个坑，别重犯**：
+- CDP 转发要随 pid 重建（`am force-stop` 后端口名变，不重建每条求值吃满 8 秒超时，看着像卡死）；
+- 判前台只能读 `topResumedActivity` 那一行（整段 `dumpsys` 里留着历史 `ActivityRecord`，会导致拿后台冻结的 WebView 空转）；
+- 构造没成功不许判产品对错（每个构造步骤后断言期望层已出现，失败就打印「构造失败，跳过」）；
+- 功能页入口不在侧栏，在侧栏「更多」菜单里（侧栏只有 `打开侧边栏/新建会话/更多/搜索会话/展开会话知识库/导出会话日志/账号菜单`）。
+
+排查时先看日志：`adb logcat | Select-String 'DshRemote: back:'`，格式 `back: layer=… action=…`。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）
@@ -594,11 +631,12 @@ const DEV = resolveSerial(process.env.DEV_SERIAL);   // 参数 > DEV_SERIAL > �
 | `probe-back-nav.cjs` | `node probe-back-nav.cjs <cdpPort> [--state\|--back]`，打印页面位置/侧栏几何，`--back` 触发返回并逐帧采样 + 抓 Document 事件 |
 | `record-back.cjs` | `node record-back.cjs <cdpPort> [帧数] [间隔ms] [目录]`，触发返回 + CDP 连拍 + DOM 采样，能抓到 1 秒内的中间态。**验证返回动效是否闪屏就看它**（§6.20） |
 | `crash-page.cjs` | `node crash-page.cjs <cdpPort>`，用 CDP `Page.crash` 让渲染进程真的崩掉，验证 `onRenderProcessGone` 兜底（§6.22）。非 root 的 `pkill` 杀不掉沙箱进程，只能靠它 |
-| probe-startup.cjs | 
-ode probe-startup.cjs <cdpPort> <毫秒> <间隔ms>，冷启动逐帧采样侧栏位置，判「启动时闪不闪」（§6.27）。**它能在 CDP 连上之前的时间窗里靠边等边连抢到采样点** |
-| probe-frame-attrs.cjs | document-start 装 MutationObserver，抓首帧 data-sidebar-collapsed 与侧栏 	ransform，用来证明「属性先到、样式后到」 |
-| probe-sidebar-anim.cjs | 逐帧记 getAnimations() + 	ransitionrun 事件，区分「CSS 过渡」与「JS 直接跳」（修法完全不同，不能靠猜） |
-| erify-no-sidebar-flash.cjs | 注入去过渡样式后 reload 复测，验证侧栏修法有效 |
+| `probe-startup.cjs` | `node probe-startup.cjs <cdpPort> <毫秒> <间隔ms>`，冷启动逐帧采样侧栏位置，判「启动时闪不闪」（§6.27）。**它能在 CDP 连上之前的时间窗里边等边连抢到采样点** |
+| `probe-frame-attrs.cjs` | document-start 装 MutationObserver，抓首帧 `data-sidebar-collapsed` 与侧栏 `transform`，用来证明「属性先到、样式后到」 |
+| `probe-sidebar-anim.cjs` | 逐帧记 `getAnimations()` + `transitionrun` 事件，区分「CSS 过渡」与「JS 直接跳」（修法完全不同，不能靠猜） |
+| `verify-no-sidebar-flash.cjs` | 注入去过渡样式后 reload 复测，验证侧栏修法有效 |
+| `probe-layer.cjs` | 把页面构造到 7 种层叠状态，逐一打印 `DSH_LOCATION_JS` 判出的层。**改判据前后都跑它**（§6.28） |
+| `verify-back-layers.cjs` | `node verify-back-layers.cjs <cdpPort>`，7 个场景各按一次真实返回键，断言「只退一层」。CDP 转发随 pid 重建、构造步骤带断言，是「返回是否互逆」的唯一判据 |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 

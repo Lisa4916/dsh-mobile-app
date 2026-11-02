@@ -898,10 +898,28 @@ class MainActivity : AppCompatActivity() {
                 }
                 webView.evaluateJavascript(WebViewFactory.DSH_LOCATION_JS) { raw ->
                     val where = BackNavigationDecider.PageLocation.fromRaw(raw)
-                    when (backDecider.decide(isWebViewVisible = true, location = where)) {
+                    val action = backDecider.decide(isWebViewVisible = true, location = where)
+                    android.util.Log.i("DshRemote", "back: layer=$where action=$action")
+                    when (action) {
+                        // 下面四个分支都是「只退一层」，谁都不许顺手把页面拉回首页
+                        BackNavigationDecider.Action.CLOSE_PANEL -> {
+                            backDecider.noteWentBack()
+                            webView.evaluateJavascript(WebViewFactory.DSH_CLOSE_PANEL_JS, null)
+                        }
+                        BackNavigationDecider.Action.DISMISS_OVERLAY -> {
+                            backDecider.noteWentBack()
+                            webView.evaluateJavascript(WebViewFactory.DSH_PRESS_ESCAPE_JS, null)
+                        }
+                        BackNavigationDecider.Action.COLLAPSE_SIDEBAR -> {
+                            backDecider.noteWentBack()
+                            webView.evaluateJavascript(WebViewFactory.DSH_PRESS_ESCAPE_JS, null)
+                        }
+                        BackNavigationDecider.Action.LEAVE_FEATURE,
                         BackNavigationDecider.Action.GO_TO_START -> {
                             backDecider.noteWentBack()
-                            // 轻量视图切换（展开侧栏 → 点新会话），约 1–2 秒，不重载页面
+                            // 回首页只能点侧栏「新会话」—— 实测唯一真·轻量切换。
+                            // 侧栏此时可能已经收起（上一个返回动作收的），
+                            // DSH_GO_HOME_JS 里对屏外元素的 click() 照样生效（第 18 步实测）。
                             webView.evaluateJavascript(WebViewFactory.DSH_GO_HOME_JS, null)
                         }
                         BackNavigationDecider.Action.EXIT_APP -> finish()

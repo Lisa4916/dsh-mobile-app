@@ -32,9 +32,10 @@
 | 16 | 审计问题的 P0/P1 修复：release 通道打通、权限依赖清理、字号不再重建、删除加确认 | ✅ | release APK 1,976,330 B 签名有效且真机可用；`tests=135`；lint 29→20 |
 | 17 | 运行态全量功能回归（14 项主流程 + 3 项自愈/兜底） | ✅ | 全部符合设计；另修 2 处工具缺陷（硬编码序列号、依赖残留手势文件） |
 | 18 | 启动时侧栏不再闪：禁掉移动端 frame 侧栏首次就位的 transition | ✅ | 冷启动逐帧采样 `sideL >= -60` 帧数 1 → 0（两轮）；`tests=135`；lint 20 warning |
+| 19 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ | 真机 7 种层叠状态全通过（`tools/verify-back-layers.cjs`）；`tests=142`；lint 0/20 |
 
-**测试基线：JVM 单测全量 `tests=135 failures=0 errors=0 skipped=0`**
-（`AutoConnectTest` 7 + `BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
+**测试基线：JVM 单测全量 `tests=142 failures=0 errors=0 skipped=0`**
+（`AutoConnectTest` 7 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
 `EndpointTest` 24 + `HandshakeHealGateTest` 10 + `HostMatchTest` 17 + `PageProbeTest` 20 +
 `RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
 **真机 instrumented：`PageProbeJsTest` 7 条 `OK (7 tests)`**（Redmi `8PCE7LJB99VG7TRO`，Android 15）
@@ -1410,3 +1411,84 @@ sideL >= -60 的帧数 = 0 ；侧栏闪动 = 否 ✅
 | `tools/probe-frame-attrs.cjs` | document-start 装观察器，抓首帧 `data-sidebar-collapsed` 与侧栏几何 |
 | `tools/probe-sidebar-anim.cjs` | 逐帧记 `getAnimations()` + `transitionrun` 事件，区分「CSS 过渡」与「JS 直接跳」 |
 | `tools/verify-no-sidebar-flash.cjs` | 注入去过渡样式后复测，验证修法有效 |
+---
+
+## 第 19 步：返回与进入严格互逆 ✅
+
+用户要求：`滑动返回，要求与进入的步骤相反，不能缺少步骤也不能多`；`无论进入哪个功能项都应如此`。
+
+### 19.1 旧版为什么「多退」
+
+旧 `BackNavigationDecider` 只认三档：`session` / `home` / `other`。于是：
+
+| 现状 | 按一次返回 | 问题 |
+|---|---|---|
+| 首页 + 侧栏展开 | **直接退出 App**（实测 `topResumedActivity` 变成 launcher） | 少退一层抽屉，直接跳到最外层 |
+| 首页 + 弹出菜单 | 直接退出 App | 同上 |
+| 会话知识库面板开着 | 面板不动，页面被当成 `session` 拉回首页 | 多退一层 |
+| 插件 / Purge 等功能视图 | 直接回首页 | 少退一层 |
+
+### 19.2 先把「有几层」量清楚
+
+新建四个探测器（`tools/probe-*.cjs`），真机逐个场景构造后采样：
+
+| 场景 | 进入后最上面一层 | Escape 能否退掉 |
+|---|---|---|
+| 首页 + 弹出菜单 | `overlay`（`[role=menu]/[role=listbox]/[role=dialog]`） | ✅ |
+| 首页 + 侧栏展开 | `sidebar`（`[class*="_sidebarCol"]` 的 `left` 从 -209 变 0） | ✅ |
+| 会话知识库面板 | `panel`（可见的「关闭xxx」按钮） | ❌ 完全无反应 |
+| 插件等功能视图 | `feature`（`[aria-current]` / `[aria-selected=true]` 点亮入口名） | ❌（视图不动） |
+| 会话页 | `session`（`对话` + `轨迹` 这对 tab） | ❌ |
+| 首页 | `home`（`探索未至之境` 等） | — |
+
+**判据顺序是硬约束**：`panel → overlay → sidebar → session → feature → home`。
+其中 `session` 必须排在 `feature` 前面 —— 会话页也有 `aria-selected="true"`（「对话」那个 tab），先判 feature 会把会话页误认成功能视图（首轮就判错过一次，见 `tools/probe-layer.cjs` 的历史）。
+
+### 19.3 改动
+
+`D:\dsh-mobile-app\app\src\main\java\com\dsh\remote\BackNavigationDecider.kt`
+- `PageLocation` 由 3 档扩到 7 档（`PANEL/OVERLAY/SIDEBAR/FEATURE/SESSION/HOME/OTHER`），注释里写明「顺序即层级」。
+- `Action` 由 3 个扩到 7 个（`CLOSE_PANEL/DISMISS_OVERLAY/COLLAPSE_SIDEBAR/LEAVE_FEATURE/GO_TO_START/EXIT_APP/RECOVER_TO_START`）。
+- `decide()` 改成**一次只退一层**：只有 `HOME` 才 `EXIT_APP`，其余层各自对应一个「只退这一层」的动作。
+
+`D:\dsh-mobile-app\app\src\main\java\com\dsh\remote\WebViewFactory.kt`
+- `DSH_LOCATION_JS` 重写：加 `visible(el)`（`display/visibility/opacity/尺寸` 四判），按上面顺序 return。
+- 新增 `DSH_PRESS_ESCAPE_JS`（发 `keydown`+`keyup` 的 `Escape`，`keyCode 27`，`bubbles:true`）。
+- 新增 `DSH_CLOSE_PANEL_JS`（点第一个可见的「关闭xxx」按钮）。
+- **`DSH_GO_HOME_JS` 一行没动** —— 第 18 步的结论是「屏外元素 `click()` 照样生效」，所以侧栏已经收起时它照样能用。
+
+`D:\dsh-mobile-app\app\src\main\java\com\dsh\remote\MainActivity.kt`
+- `installBackHandling()` 里加日志 `back: layer=… action=…`（排查返回问题时靠它，省一轮猜）。
+- 四个新分支各自只做一件事，谁都不许顺手把页面拉回首页。
+
+### 19.4 真机验证（`tools/verify-back-layers.cjs`，7/7 通过）
+
+```
+=== 首页 + 弹出菜单 ===      overlay → home        ✅ 只退了一层
+=== 首页 + 侧栏展开 ===      sidebar → home        ✅
+=== 功能视图（插件）===       feature → home        ✅
+=== 功能视图 + 侧栏展开 ===   sidebar → feature     ✅（只收抽屉，视图不动）
+=== 会话页 ===               session → home        ✅
+=== 会话页 + 侧栏展开 ===     sidebar → session     ✅
+=== 会话页 + 知识库面板 ===   panel   → session     ✅
+合计：7 项，失败 0 项
+```
+
+首页按返回仍退到桌面，日志 `back: layer=HOME action=EXIT_APP`。
+
+### 19.5 这个验证脚本自己踩过的四个坑（都已修，别再犯）
+
+1. **CDP 转发要随 pid 重建**：`am force-stop` 后 pid 变，`webview_devtools_remote_<pid>` 跟着变，不重建时每条求值吃满 8 秒超时，外面看就是脚本卡死。
+2. **判「App 在不在前台」只能读 `topResumedActivity` 那一行**：`dumpsys activity activities` 整段里留着历史 `ActivityRecord`，用整段 `indexOf` 会把「已退到桌面」当成「还在前台」，然后拿一个后台被冻结的 WebView 反复求值、永远等不到 `home`。
+3. **构造没成功不许判产品对错**：上一版把「点插件没点上」记成了产品缺陷。现在每个构造步骤后都断言期望层已出现，失败就打印「构造失败，跳过」。
+4. **功能页入口不在侧栏上**，在侧栏「更多」菜单里。侧栏 `aria-label` 实测只有：`打开侧边栏 / 新建会话 / 更多 / 搜索会话 / 展开会话知识库 / 导出会话日志 / 账号菜单`；`插件 / 自动化任务 / XD Pool / Purge` 全在「更多」里面。
+
+### 19.6 回归
+
+| 项 | 结果 |
+|---|---|
+| 单测 | **142 / 0 failures**（`BackNavigationDeciderTest` 11 → 18 条，新增 6 条逐层断言 + 1 条「层内不越级」） |
+| lint | 0 error / 20 warning（与第 16 步一致，无新增） |
+| APK | `app-debug.apk` 7,296,484 B |
+| 首页按返回 | 退到桌面，`back: layer=HOME action=EXIT_APP` |
+| 侧栏手动展开 / 会话页 | 未被改坏（7/7 用例里含这两项） |

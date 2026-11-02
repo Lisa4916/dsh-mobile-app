@@ -42,7 +42,7 @@ dsh-pocket 反向代理（认证 + cookie + 注入 launch token）
 | `RecoveryExecutor.kt` | 157 | 自愈编排：探针结果 → 动作，经 `RecoveryEnvironment` 接口注入副作用 |
 | `HandshakeHealGate.kt` | 131 | 自愈的节流闸门：每次事故最多动作 3 次、退避 5→10→20→30s |
 | `RecoveryPlanner.kt` | 129 | 页面状态 → 恢复动作的纯决策（不碰 Android API） |
-| `BackNavigationDecider.kt` | 82 | 返回键语义：会话页回首页、首页退出 App |
+| `BackNavigationDecider.kt` | 123 | 返回键语义：页面七层，一次只退一层（只有首页才退出 App） |
 | `ConnectionRepository.kt` | 69 | 档案读写接口 + `AutoConnect.decide()` 三态（Connect / Seed / ShowList） |
 | `BootstrapUrl.kt` | 68 | 内置地址拼接（host + PIN → 完整 URL），不硬编码任何真实地址 |
 | `HostMatch.kt` | 63 | 「算不算同一个站」的唯一判据：host 精确比对 + 点子域边界，`mailto:`/`tel:` 不丢浏览器 |
@@ -66,7 +66,7 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'; $env:ANDROID_HOME='D:\AndroidDev\sdk'; $en
 | `PageProbeTest` | 20 | 六种页面形态与优先级、长正文、null 兜底、`evaluateJavascript` 返回值还原 |
 | `RecoveryPlannerTest` | 14 | 页面状态 → 动作分派、「带 token 才清 pocket cookie」铁律、retry 参数插在 `#` 之前 |
 | `RecoveryExecutorTest` | 12 | 副作用断言（FakeEnv 记录）：清对 cookie、`ASK_USER` 不重放 Toast、退避与单轮额度 |
-| `BackNavigationDeciderTest` | 11 | 返回键三种语义 |
+| `BackNavigationDeciderTest` | 18 | 返回键七层逐层断言 + 层内不越级 |
 | `BootstrapUrlTest` | 10 | 内置地址拼接、scheme/尾斜杠容错、空值返回 null |
 | `CookieNamesTest` | 10 | 前缀精确匹配、值里出现名字不算、过期指令只作用一个名字 |
 | `HandshakeHealGateTest` | 10 | 节流与退避 |
@@ -165,6 +165,7 @@ App 的处理（`RecoveryPlanner` + `HandshakeHealGate`）：
 11. **不覆盖 `onRenderProcessGone` 的话，渲染进程被回收会把整个 App 带走。** 而渲染进程被清在这台机器上是常态（logcat：`ProcessSceneCleaner: SwipeUpClean: kill procName=…:sandboxed_process0`）。死掉的 WebView 不能复用，`loadUrl` 静默不生效，只能销毁重建。非 root 杀不掉沙箱进程，验证要用 CDP 的 `Page.crash`（`tools/crash-page.cjs`）。
 12. **应用分身里也会装同名包。** 桌面上出现 3 个同名图标、点图标弹「选择要使用的应用程序」时，先 `pm list users` 查 900/901 分身用户，再 `pm uninstall --user N <pkg>`。别先怀疑 `am start` 的写法。
 13. **启动时侧栏闪一下，是页面的 CSS 过渡，不是我们的代码。** `data-sidebar-collapsed="true"` 首帧就在 DOM 上，但 `transform` 要等 hydration 之后才写上去，中间那 280ms 就是「展开了又收回去」。修法是 document-start 注入一条 `transition:none`，**只禁过渡、不写死位置**。别去改 `DSH_GO_HOME_JS` —— 启动路径根本不调它（只有按返回键才调），改它只会把返回键弄坏。详见 `AGENTS.md` §6.27。
+14. **返回键要「一次只退一层」，页面其实有七层。** 旧版只认 `session / home / other` 三档，于是「首页 + 侧栏展开」按返回**直接退出 App**（多退了一步），而「会话知识库面板开着」会把手底下的会话页拉回首页（又少退了一层）。现在按 `panel → overlay → sidebar → session → feature → home` 判，每层只对应一个动作。两个坑：会话页也有 `aria-selected="true"`，所以 `session` 判据必须排在 `feature` 前面；`Escape` 对面板和会话页完全无效（实测 `layerN 0→2→2`），只有抽屉和菜单认它。详见 `AGENTS.md` §6.28。
 
 ## 构建
 
@@ -191,8 +192,9 @@ $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | `tests=135 failures=0 errors=0 skipped=0`（10 个测试类） |
-| APK | 7,485,956 B（第 14 步后全量构建） |
+| 单元测试 | `tests=142 failures=0 errors=0 skipped=0`（10 个测试类） |
+| APK | `app-debug.apk` 7,296,484 B / `app-release.apk` 1,976,330 B |
+| 返回互逆 | `tools/verify-back-layers.cjs` 7 场景全过（面板 / 菜单 / 抽屉 / 会话 / 功能视图 / 首页各按一次只退一层） |
 | 真机 instrumented | `PageProbeJsTest` 7 条 `OK (7 tests)`（`8PCE7LJB99VG7TRO`，Android 15） |
 | lint | 0 error / 20 warning |
 | 局域网 | 扫码/手输后进入 DSH 主界面 |
@@ -232,6 +234,8 @@ $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
 | `probe-frame-attrs.cjs` | document-start 装 MutationObserver，抓首帧 `data-sidebar-collapsed` 与侧栏 `transform`，证明「属性先到、样式后到」 |
 | `probe-sidebar-anim.cjs` | 逐帧记 `getAnimations()` + `transitionrun`，区分「CSS 过渡」与「JS 直接跳」（修法完全不同） |
 | `verify-no-sidebar-flash.cjs` | 注入去过渡样式后 reload 复测，验证侧栏修法有效 |
+| `probe-layer.cjs` | 把页面构造到 7 种层叠状态，逐一打印页面自报的层（panel/overlay/sidebar/session/feature/home），改判据前后都跑 |
+| `verify-back-layers.cjs` | 7 个场景各按一次真实返回键，断言「只退一层」。**「返回是否与进入互逆」的唯一判据** |
 
 `_` 前缀的是早期一次性探针（`_probe-cur.cjs`、`_probe-page.cjs`、`_probe-storage.cjs`、`_tabs.cjs`、`_test-reset.cjs`），留作参考，不进主流程。
 

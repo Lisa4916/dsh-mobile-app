@@ -419,17 +419,92 @@ object WebViewFactory {
     const val DSH_LOCATION_JS = """
         (function(){
           try {
+            function visible(el){
+              if(!el) return false;
+              var cs=getComputedStyle(el), r=el.getBoundingClientRect();
+              if(cs.display==='none'||cs.visibility==='hidden'||Number(cs.opacity)<0.05) return false;
+              return r.width>8 && r.height>8;
+            }
+            // 1) 带「关闭xxx」按钮的浮层（会话知识库那种面板）
+            var closers=document.querySelectorAll('button,[role=button]');
+            for(var i=0;i<closers.length;i++){
+              var al=closers[i].getAttribute('aria-label')||'';
+              if(al.indexOf('关闭')===0 && visible(closers[i])) return 'panel';
+            }
+            // 2) 菜单 / 下拉 / 对话框
+            var ov=document.querySelectorAll('[role=menu],[role=listbox],[role=dialog]');
+            for(var j=0;j<ov.length;j++) if(visible(ov[j])) return 'overlay';
+            // 3) 左抽屉展开（实测收起态 left≈-209，展开态 0）
+            var s=document.querySelector('[class*="_sidebarCol"]');
+            if(s && s.getBoundingClientRect().left>-40) return 'sidebar';
             var b = (document.body ? document.body.innerText : '') || '';
             if (b.length === 0) return 'other';
-            var hasHero = b.indexOf('探索未至之境') !== -1;
-            var hasComposer = b.indexOf('描述你想要构建的内容') !== -1
-                           || b.indexOf('发消息或创建任务') !== -1
-                           || b.indexOf('选择一个工作区开始') !== -1;
-            var hasSessionTabs = b.indexOf('对话') !== -1 && b.indexOf('轨迹') !== -1;
-            if (hasSessionTabs) return 'session';
-            if (hasHero || hasComposer) return 'home';
+            // 4) 会话页（「对话」「轨迹」这对 tab 只有会话页有）。
+            //    ★ 必须排在 feature 之前：会话页也有 aria-selected="true"（「对话」那个 tab），
+            //    先判 feature 会把会话页当功能视图 —— 实测就判错过一次。
+            if (b.indexOf('对话') !== -1 && b.indexOf('轨迹') !== -1) return 'session';
+            // 5) 侧栏功能视图：靠 [aria-current] 认，首页/会话页都没有这个属性
+            var cur=document.querySelector('[aria-current="page"],[aria-current="true"],[aria-selected="true"]');
+            if(cur){
+              var t=((cur.getAttribute('aria-label')||cur.innerText||'')+'').trim();
+              if(t && t!=='新会话') return 'feature';
+            }
+            // 6) 首页
+            if (b.indexOf('探索未至之境') !== -1) return 'home';
+            if (b.indexOf('描述你想要构建的内容') !== -1) return 'home';
+            if (b.indexOf('发消息或创建任务') !== -1) return 'home';
+            if (b.indexOf('选择一个工作区开始') !== -1) return 'home';
             return 'other';
           } catch (e) { return 'other'; }
+        })();
+    """
+
+    /**
+     * 给页面发一个 Escape 键 —— 菜单浮层和左抽屉都自己认这个键，语义正好是「退一层」。
+     *
+     * 为什么优先用 Escape 而不是「找关闭按钮点」：真机实测（`tools/probe-escape.cjs`）
+     * 页面自己对 Escape 的处理是**幂等退一层**，而且走的是它自己的关闭动画与状态回收；
+     * 我们手动点按钮容易点错同名的元素（页面上有多个 `关闭`）。
+     *
+     * 实测覆盖：首页+菜单 ✅、首页+抽屉 ✅、会话页+抽屉 ✅（退出到 `feature` 时抽屉收起、
+     * 功能视图本身不动 —— 这正是「只退一层」）。
+     * **管不了的两层**：会话知识库那种带「关闭xxx」的 panel，以及会话页本身。
+     */
+    const val DSH_PRESS_ESCAPE_JS = """
+        (function(){
+          try {
+            var o={key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true,cancelable:true};
+            var t=document.activeElement||document.body||document.documentElement;
+            t.dispatchEvent(new KeyboardEvent('keydown',o));
+            t.dispatchEvent(new KeyboardEvent('keyup',o));
+            return 'sent';
+          } catch(e){ return 'err'; }
+        })();
+    """
+
+    /**
+     * 点掉最上面那个浮层自己的「关闭」按钮（会话知识库那种 panel）。
+     *
+     * 为什么不能用 Escape：实测这一层对 Escape **完全无反应**（`layerN 0→2→2`）。
+     * 页面上会同时存在 `关闭` 与 `关闭会话知识库` 两个 aria-label，点哪个都行；
+     * 这里取**第一个可见的**，因为 `关闭` 是最外层、语义最明确。
+     */
+    const val DSH_CLOSE_PANEL_JS = """
+        (function(){
+          try {
+            function visible(el){
+              if(!el) return false;
+              var cs=getComputedStyle(el), r=el.getBoundingClientRect();
+              if(cs.display==='none'||cs.visibility==='hidden'||Number(cs.opacity)<0.05) return false;
+              return r.width>8 && r.height>8;
+            }
+            var bs=document.querySelectorAll('button,[role=button]');
+            for(var i=0;i<bs.length;i++){
+              var al=bs[i].getAttribute('aria-label')||'';
+              if(al.indexOf('关闭')===0 && visible(bs[i])){ bs[i].click(); return 'ok'; }
+            }
+            return 'nf';
+          } catch(e){ return 'err'; }
         })();
     """
 

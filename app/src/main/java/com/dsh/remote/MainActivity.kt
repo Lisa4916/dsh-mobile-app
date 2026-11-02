@@ -699,11 +699,26 @@ class MainActivity : AppCompatActivity() {
         cm.flush()
     }
 
-    /** 主页加载失败时不要静默黑屏：留在连接列表并说明原因。 */
+    /**
+     * 主页加载失败时不要静默黑屏：留在连接列表并说明原因。
+     *
+     * 另外把 WebView 从 Chromium 的错误页里推出来，换成 about:blank。加载失败后页面会停在
+     * `chrome-error://chromewebdata/`（CDP 可查），而用户看到的是我们的连接列表 ——
+     * 那个错误页藏在 GONE 的 WebView 里。留着它没有好处：下次显示可能闪一帧，
+     * 且错误页自带的「重试」与列表按钮指向不同 URL，容易混淆状态。
+     *
+     * 断言边界（不写没验证过的事）：**没有实测证据表明**留在错误页会导致下一次
+     * `loadUrl` 失败。曾用 `input tap` 做过三次「点了没反应」的复现，后来查明是
+     * MIUI 拒绝了触摸注入（logcat `InputManager: Input event injection from pid N failed`），
+     * 按钮根本没被点到；改用 `monkey -f` 精确注入后，清与不清错误页都能连上。
+     * 所以这里只是清理状态，不是在修某个已知的导航缺陷。
+     */
     internal fun onPageError(code: Int, description: String?) {
         progress.visibility = View.GONE
         android.util.Log.w("DshRemote", "main frame error $code: $description")
         toast("连接失败（$code）：${description ?: "未知原因"}")
+        // 顺序有讲究：先离开错误页，再切回列表。反过来会让空白页在可见状态下闪一下。
+        webView.loadUrl(BLANK_PAGE)
         showList()
     }
 
@@ -816,6 +831,16 @@ class MainActivity : AppCompatActivity() {
          * `?token=` 也停在「访问验证」页。见 [RecoveryPlanner] 顶部的实测对照。
          */
         const val POCKET_COOKIE = "dsh_pocket_token"
+
+        /**
+         * 用来把 WebView 从 Chromium 内部错误页里推出来。
+         *
+         * 主页面加载失败后页面会停在 `chrome-error://chromewebdata/`。加载这个空白页
+         * 可以清掉那个状态，避免错误页在下次显示时闪一帧。
+         * **注意**：曾误以为不清错误页会导致下一次 `loadUrl` 被短路，那是 `input tap`
+         * 被 MIUI 拒绝注入造成的假阴性，详见 [onPageError] 的说明。
+         */
+        const val BLANK_PAGE = "about:blank"
 
         /**
          * 探测页面处于什么状态。返回值经 [PageState.fromProbe] 翻译：

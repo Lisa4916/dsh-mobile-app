@@ -346,6 +346,9 @@ FINAL  title = DeepSeek Harness
 | `tools/verify-selfheal.cjs` | 同一进程内「弄脏 → 导航 → 逐秒采样页面」，给 ✅/❌ |
 | `tools/verify-selfheal-net.cjs` | **判定力最强**：抓 `Network.requestWillBeSent`，识别同时带 `dsh-pocket-retry` 与 `token=` 的那一跳。**支持 `<cdpPort>` 参数、cookie domain 从页面 origin 现取**（公网域名也能用） |
 | `tools/verify-ask-user.cjs` | 验证反面分支：无 `?token=` 时自愈**必须不动手**（不清 cookie、不重导航、停在验证页） |
+| `tools/probe-netstack.cjs` | 探 WebView 当前 title/url/readyState/body；`--navigate <url>` 时先导航再观察 15 秒，统计 Document 请求/响应/失败 |
+| `tools/watch-net.cjs` | 持续监听 CDP 网络事件 `<cdpPort> <秒数>`，末尾给「Document 请求总数」，为 0 时标注「loadUrl 被短路」 |
+| `tools/tap.cjs` | **真机可靠点击**：`node tap.cjs <x> <y> [serial]`，走 `monkey -f` 绕开 MIUI 对 `input tap` 的注入拒绝 |
 
 ---
 
@@ -413,14 +416,39 @@ dsh_pocket_token = 仍是脏值（未清）
 **这条比自愈成功更重要**：没有 token 可重放时，清了 `dsh_pocket_token` 就等于把用户永久锁在验证页外。
 单测（`RecoveryPlannerTest.plan_pinPageWithoutTokenAsksUser`）钉住了这个判据，真机这次也证明代码确实按它走。
 
-### 断网 → 恢复 → 点重连（顺手量的行为，记在案）
+### 断网 → 恢复 → 点重连：**结论已推翻**（假阴性）
 
-- 飞行模式下启动：`main frame error -2: net::ERR_INTERNET_DISCONNECTED` → 退回连接列表并 toast（**不黑屏**）。
-- 恢复网络后点同一行：**首次点 2 次都是「网页无法打开」**，第三次（`am force-stop` 后重启再点）正常进主界面。
-  恢复网络到成功之间隔了 20 秒以上，仍出现过失败，说明**不是"网络还没就绪"**；
-  期间 `ping` / `TCP 443` 从手机侧都通，`Host` 头也正确，所以不是 DNS 或连通性问题。
-  怀疑与 WebView 进程在飞行模式期间被系统清掉（`ProcessSceneCleaner: SwipeUpClean: kill procName=...webview...sandboxed_process0`）
-  后重建有关，**尚未定论**，留作下一步。
+当初记的是「恢复网络后点同一行，前 2 次都是『网页无法打开』，`am force-stop` 后才进得去」，
+并怀疑 WebView 错误页把 `loadUrl` 短路了。**这个结论是错的，已作废。**
+
+真因：**MIUI 拒绝了 `adb shell input tap` 的触摸注入**，按钮根本没被点到。
+logcat 铁证：
+```
+W MIUIInput: Input event injection from package: null action ACTION_DOWN
+D InputManager: injectMotionEvent: 6369-{action=ACTION_DOWN, ... x[0]=540.0, y[0]=613.0 ...}
+W InputManager: Input event injection from pid 6369 failed.
+```
+`input tap` / `input touchscreen tap` / `input swipe` / `input motionevent` / `sendevent`
+全部无效（`sendevent` 还 `Permission denied`），只有 `input keyevent` 有效 ——
+所以「adb 能用」这个假象特别容易骗人。之前 CDP 抓到的「Document 请求数 = 0」
+就是这么来的：不是导航被短路，是压根没人点它。
+
+改用 `monkey -f` 精确注入（`tools/tap.cjs`）重测，**修复版与未修复版都一样通过**：
+
+| 场景 | 结果 |
+|---|---|
+| 离线启动 → 恢复网络 → 点同一行 | 一次进主界面。Document 请求 2 次：`?token=75330002` → `/`，`title=DeepSeek Harness` |
+| 主界面正常时断网 → 恢复 | 页面一直是主界面，无需任何操作 |
+| 离线时连点 3 次（每次都报错）→ 恢复 → 点 | 一次进主界面 |
+
+**保留的改动**：`onPageError()` 里仍会在 `showList()` 之前 `loadUrl(BLANK_PAGE)`，
+把 WebView 从 `chrome-error://chromewebdata/` 换成 `about:blank`。这只是状态清理
+（避免错误页在下次显示时闪一帧、避免错误页自带的重试按钮与列表状态混淆），
+**不是在修某个已验证的导航缺陷** —— 代码注释里也这么写，别再把它当成 bug 修复的功劳。
+
+**教训**：在 Android 上验证「点击有没有生效」之前，先证明注入本身是通的
+（点一个必定有可见副作用的控件，或看 logcat 有没有 `injection ... failed`）。
+否则所有「点了没反应」都是假阴性。
 
 ---
 
@@ -468,13 +496,14 @@ dsh_pocket_token = 仍是脏值（未清）
 
 1. ~~真机验证第 7b 步自愈~~ ✅ 已完成（第 7d 步，CDP 抓到 `retry+token` 重连）。
 2. ~~第 7 步公网远程连接~~ ✅ 已完成（第 7e 步）：隧道开启、真机 4G 进主界面、公网下自愈与 ASK_USER 两支都实测。
-3. **断网恢复后点重连，首次点击仍会「网页无法打开」**（第 7e 步末尾）。已排除网络/DNS/连通性，
-   怀疑 WebView 沙箱进程被系统清掉后重建，下一步查这条。
+3. ~~断网恢复后点重连，首次点击仍会「网页无法打开」~~ ❌ **已推翻，不是 App 的问题**。
+   真因是 MIUI 拒绝 `adb shell input tap` 的触摸注入，按钮根本没被点到（见第 7e 步末尾小节）。
+   改用 `monkey -f`（`tools/tap.cjs`）重测，修复前后都能一次连上。**不用再查这条。**
 4. **隧道重开后地址会变**：`tunnel-auto.json` 不存 URL。可以考虑把「刷新公网地址」做进 App ——
    从 dsh-pocket 的 `pocket.status` / `tunnel.start` RPC 读回当前地址，省掉手动抄。
 5. 公网首次握手走的是 **POST 登录路径**（`proxy.mjs:852`），与局域网 `?token=` 不同，
    `HandshakeHealGate` 在这条路径上的表现还没单独量。
-5. 真机身份已更正为 `ZY22GHMK5F`（motorola XT2335-3 / Android 14），
+6. 真机身份已更正为 `ZY22GHMK5F`（motorola XT2335-3 / Android 14），
    后续验证以这台为准；Redmi 那台的记录只在 `kb/` 与 `CONTEXT-ANCHOR.md` 的历史环境标注里保留。
 
 命名隧道（固定域名）是第 7 步的可选项，需要 Cloudflare 账号 + 自有域名 + Tunnel Token，

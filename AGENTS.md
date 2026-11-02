@@ -238,6 +238,9 @@ App 重装后 `webview_devtools_remote_<pid>` 名字会变。
 CSS px × `(1080 / window.innerWidth)` = ×2.748。用 CSS 值直接点会全部落空。
 `element.focus()` 在 Android WebView **不唤**系统键盘，必须真实触摸。
 
+**注意**：坐标换算对了也没用 —— 这台 MIUI 会拒绝 `input tap` 的注入，见 §6.18，
+真机点击一律走 `tools/tap.cjs`（`monkey -f`）。
+
 ### 6.11 截图会骗人
 全黑有三种不同原因：屏幕睡眠（`isSleeping=true`）、通知栏 `NotificationShade` 抢焦点（`cmd statusbar collapse`）、WebView 渲染时序。
 可靠判据是 `uiautomator dump` 控件树 + chromium CONSOLE 日志的来源 URL，不是截图。
@@ -292,13 +295,51 @@ CSS px × `(1080 / window.innerWidth)` = ×2.748。用 CSS 值直接点会全部
   （`code` 是 -1，进程被杀的通用码，`dsh-pocket/lib/service.mjs:347`）。
   **复位办法**：点 `关闭公网` 让按钮回到「开启公网访问」，再点一次。
 
-### 6.18 断网恢复后，第一次点连接会「网页无法打开」
+### 6.18 断网恢复后「点连接没反应」是**假象**——MIUI 拦掉了 `input tap`
+
+**这条当初记错了，结论已推翻，按新结论执行。**
+
 飞行模式下启动会正确报 `net::ERR_INTERNET_DISCONNECTED` 并退回列表（不黑屏，这是对的）。
-但恢复网络后点同一行，**前两次都是「网页无法打开」，`am force-stop` 重启后才进得去**。
-已排除网络自身：同时刻手机侧 `ping 1.1.1.1`、`TCP 443`、带正确 `Host` 头的请求全通，恢复后还多等了 20 秒。
-可疑点是 WebView 沙箱进程在飞行模式期间被系统清掉
-（`ProcessSceneCleaner: SwipeUpClean: kill procName=...webview...sandboxed_process0`）后重建。
-**结论未定，别当成网络问题去查。**
+当初看到「恢复网络后点同一行没反应、必须 `am force-stop` 重启」，于是怀疑 WebView
+错误页把 `loadUrl` 短路了 —— **这个判断是错的**。
+
+真因：**MIUI（本机 Android 15）拒绝 `adb shell input tap` 的触摸注入**，事件根本没进 App。
+logcat 里是：
+```
+W MIUIInput: Input event injection from package: null action ACTION_DOWN
+D InputManager: injectMotionEvent: 6369-{action=ACTION_DOWN, ... x[0]=540.0, y[0]=613.0 ...}
+W InputManager: Input event injection from pid 6369 failed.
+```
+`input tap` / `input touchscreen tap` / `input swipe` / `input motionevent` / `sendevent`
+在这台机器上全部无效（`sendevent` 还会 `Permission denied`），而 **`input keyevent` 有效**
+（`KEYCODE_HOME` 能回桌面）—— 所以「adb 能用」这个假象特别容易骗人。
+
+**正确做法：用 `monkey -f` 精确注入**，见 §6.19 和 `tools/tap.cjs`。
+
+用 `monkey` 重测后的实况（修复前后都一样）：
+- 离线启动 → 恢复网络 → 点同一行：**一次就进主界面**，出现 2 个 Document 请求
+  （`?token=…` → `/`），`title=DeepSeek Harness`；
+- 主界面正常时断网再恢复：页面一直是主界面，不需要任何操作。
+
+教训：**在 Android 上验证「点击有没有生效」之前，先证明注入本身是通的**
+（点一个必定有可见副作用的控件，或看 logcat 有没有 `injection ... failed`）。
+否则所有「点了没反应」都是假阴性。
+
+### 6.19 真机上可靠点击：`monkey -f` 而不是 `input tap`
+
+```powershell
+node .\tools\tap.cjs 540 613 8PCE7LJB99VG7TRO   # 坐标 + 序列号
+```
+内部做的事：把 `DispatchPointer(...)` 脚本 base64 送进 `/data/local/tmp/tap.txt`，
+再 `monkey -p com.dsh.remote -f /data/local/tmp/tap.txt -v 6`。
+
+两个必须知道的点：
+- **判据只看 `Events injected` 是否非 0**。末尾那行 `Dropped: keys=0 pointers=1` 在点击
+  **正常生效**时也会出现 pointers=1，拿它判断会误报失败。
+- `monkey` 会先起一个 LAUNCHER Intent，把 App 带到前台。所以用它点击前，
+  App 必须已经停在你要点的那个界面（不会被它重置状态）。
+
+坐标用 `uiautomator dump` 拿 `bounds` 再取中心，别按逻辑像素硬猜（§6.10）。
 
 ---
 
@@ -320,6 +361,9 @@ CSS px × `(1080 / window.innerWidth)` = ×2.748。用 CSS 值直接点会全部
 | `verify-selfheal.cjs` | 同一进程内「弄脏 → 导航 → 逐秒采样页面」，给 ✅/❌ |
 | `verify-selfheal-net.cjs` | **判定力最强**：抓 `Network.requestWillBeSent`，识别同时带 `dsh-pocket-retry` 与 `token=` 的那一跳（§6.13）。支持 `<cdpPort>` 参数；cookie domain 从页面 origin 现取，公网域名可用 |
 | `verify-ask-user.cjs` | 反面分支：无 `?token=` 时自愈**必须不动手**（不清 cookie、不重导航、停在验证页） |
+| `probe-netstack.cjs` | 探 WebView 当前 title/url/readyState/body；带 `--navigate <url>` 时先导航再观察 15 秒并统计 Document 请求/响应/失败 |
+| `watch-net.cjs` | 持续监听 CDP 网络事件（`<cdpPort> <秒数>`），末尾给「Document 请求总数」，为 0 时标注「loadUrl 被短路」。判断「点击到底有没有发出导航」用它 |
+| `tap.cjs` | 真机可靠点击：`node tap.cjs <x> <y> [serial]`，走 `monkey -f` 绕开 MIUI 对 `input tap` 的注入拒绝（§6.19） |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 

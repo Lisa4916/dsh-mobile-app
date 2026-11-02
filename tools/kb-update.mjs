@@ -66,8 +66,14 @@ function parseFile(file) {
   };
 }
 
-const files = existsSync(UPDIR) ? readdirSync(UPDIR).filter(f => f.endsWith('.md')).sort() : [];
-if (!files.length) { console.log('kb/updates 下没有 .md，无事可做'); process.exit(0); }
+// --only <regex>：只处理文件名匹配的源文件。已有 8 篇入库过，全量重跑会把它们再各升一版，
+// 所以追加新文档时必须限定范围。
+const onlyIdx = process.argv.indexOf('--only');
+const ONLY = onlyIdx > 0 ? new RegExp(process.argv[onlyIdx + 1], 'u') : null;
+
+const all = existsSync(UPDIR) ? readdirSync(UPDIR).filter(f => f.endsWith('.md') && existsSync(join(UPDIR, f))).sort() : [];
+const files = ONLY ? all.filter(f => ONLY.test(f)) : all;
+if (!files.length) { console.log('kb/updates 下没有匹配的 .md，无事可做'); process.exit(0); }
 const jobs = files.map(parseFile);
 
 // 先离线核对：目标 id 必须唯一，正文必须能被插件自己的 markdown 解析器接受

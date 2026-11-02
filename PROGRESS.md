@@ -28,6 +28,7 @@
 | 12 | 滑动返回不再闪侧栏（直接点屏外按钮，不展开侧栏） | ✅ | 真机 4 轮 `sideL` 全程 `-217` 不动；`tests=118`；lint 0/27 |
 | 13 | 知识库二次强化：纠 4 篇过时/错误结论 + 新增 3 篇 | ✅ | base 内 13 → 16 篇；`passage` 全部 `ready`；`kb-verify` 全绿 |
 | 14 | 安全与可见性修复：同域判定 / 状态栏前景 / 文案 / 渲染进程兜底 | ✅ | 全量 `tests=135`；真机四项逐条验证通过（第 14 步） |
+| 15 | 全网检索手机开发资料 + 知识库扩到 25 篇 | ✅ | base 内 16 → 25 篇；`passage` 全部 `ready`；`kb-verify` 全绿 |
 
 **测试基线：JVM 单测全量 `tests=135 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
@@ -965,6 +966,74 @@ pm list packages --user 901 | grep dsh.remote  →  package:com.dsh.remote
 更省事的做法：**装 APK 时直接只装给主用户** —— `adb shell pm install -r --user 0 <apk>`。
 `adb install -r` 默认对**所有用户**安装，所以清完分身再重装一次又会全部回来（这一步踩了第二次）。
 判据：`am start` 之后 `topResumedActivity` 直接是 `com.dsh.remote/.MainActivity` 而不是 `ResolverActivity`。
+
+---
+
+## 第 15 步：全网检索 + 知识库扩充到 25 篇 ✅
+
+用户要求「全网检索手机软件开发相关信息，全面提升开发能力」。做法不是收集链接，而是**把检索结论按本项目缺的空白补成可执行的文档**，并全部写进「手机软件开发知识库」。
+
+### 15.1 检索覆盖的 8 个方向
+
+| 方向 | 检索到的关键事实 |
+|---|---|
+| 平台版本节奏 | Play 自 2025-08-31 要求 `targetSdk ≥ 35`；**2026-08-31 起要 36**，延期申请截止 2026-11-01 |
+| Android 16 行为变更 | **edge-to-edge 的 opt-out 被彻底移除**（`windowOptOutEdgeToEdgeEnforcement` 在 target 36 下 deprecated + disabled）；predictive back 默认开启，`onBackPressed()` 不再被调用 |
+| WebView 安全 | `shouldOverrideUrlLoading` 必须做 host 白名单比对；`addJavascriptInterface` 从 API 17 起只暴露 `@JavascriptInterface`，但注解只解决「哪些方法可见」，不解决「谁在调用」 |
+| 渲染进程 | 官方文档明确：不覆盖 `onRenderProcessGone` 返回 true，系统会杀掉宿主进程 |
+| R8 / 发布 | Google 2025-11 官方把「R8 optimizer full mode」列为投入产出比最高的性能改动；AGP 8.12 起有 optimized resource shrinking |
+| 测试分层 | Robolectric **不支持 WebView 与系统 UI**，这两类必须走真机/模拟器；Gradle Managed Devices 是自建 CI 的首选 |
+| 性能验证 | Baseline Profile 官方量级「首启快约 30%」，Now in Android 实测 229ms vs 324.8ms |
+| 架构 | 模块化的出发点是「多人/多特性并行」与「多 App 复用」，单人体量下收益接近零 |
+
+### 15.2 新增 9 篇（`kb/updates/09..17`）
+
+```
+09-android-version-cadence.md           c993c4c8 v1 1622字 构建
+10-android16-edge-to-edge-predictive-back.md  ff26c2a9 v1 2840字 外壳
+11-webview-security-baseline.md         e7fa212d v1 2972字 外壳
+12-render-process-gone.md               8692ab03 v1 2492字 外壳
+13-test-layering.md                     1ec2da37 v1 2422字 测试
+14-r8-and-release.md                    3256d358 v1 2651字 构建
+15-architecture-layering.md             d04d8b3b v1 2705字 架构
+16-local-secret-storage.md              2f1ca5b0 v1 2277字 架构
+17-performance-verification.md          676ec630 v1 2142字 测试
+```
+
+每篇都做到了两件事：**引用了外部的日期/数字**（不是凭印象），**落回本项目的实际取舍**（例如明确写了「本项目为什么暂时不做 Baseline Profile」—— 冷启动 820ms 里绝大部分是 WebView + 远程页面首屏，代码执行只占少数，优化 95ms 无体感）。
+
+### 15.3 工具改造：`kb-update.mjs` 加 `--only`
+
+第一次跑发现的问题：`kb/updates/` 里已有 8 篇**已入库**的源文件，直接全量跑会把它们各再升一版（凭空多 8 个版本号）。加了 `--only '<regex>'`：
+
+```
+node tools/kb-update.mjs --dry --only '^(09|1[0-7])-'
+node tools/kb-update.mjs       --only '^(09|1[0-7])-'
+```
+
+**默认不加 `--only` 就等于「全目录重刷」**，这个行为本身是对的（要批量修的时候用得上），但追加新文档时必须限定范围。
+
+### 15.4 结果
+
+```
+base 内 16 → 25 篇；全库 entries 44；passage ready 44 / pending 0
+kb-verify：25 个 .md 全部「解析OK」，validStructure 全 valid
+FTS 召回抽检：
+  targetSdk                → 平台版本节奏 + Android 16 迁移面
+  onRenderProcessGone      → 渲染进程被回收
+  R8 / proguard / MinifyEnabled → R8 与发布配置
+  Robolectric              → 测试分层
+  allowBackup              → 本地敏感数据的存放边界
+  "Baseline Profile"       → 性能验证
+  shouldOverrideUrlLoading → WebView 安全基线 + 外壳 + 回归清单
+```
+
+`NewApi` 这类只出现在正文小节的词召回 0 条，是 FTS5 分词 + 只索引 title/body 摘要的已知行为，不影响按主题检索。
+
+### 15.5 库备份
+
+改库前用 `VACUUM INTO` 出了快照 `C:\Users\yaoqi\.dsh\knowledge\snapshot-20261102-124433.sqlite`。
+**不要用文件复制备份 WAL 模式的 sqlite**，先 `VACUUM INTO` 再复制才安全。
 
 ---
 

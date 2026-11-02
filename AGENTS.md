@@ -98,7 +98,7 @@ dsh.lanPin=<token-lan 的内容>
 | 7c | 真机无线调试接入 | ❌ 放弃（配对成功但恒 offline，改走 USB） |
 | 7d | 真机 USB 接入 + 第 7b 步真机复验 | ✅ |
 | 7e | 公网隧道开启 + 真机 4G 验证 + ASK_USER 分支实测 | ✅ |
-| 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness`；后续两次强化共 16 篇 | ✅ 见 §8 |
+| 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness`；三次强化后共 **25 篇**（含平台版本节奏、Android 16 迁移、WebView 安全基线、渲染进程兜底、R8/发布、测试分层、架构分层、敏感数据、性能验证） | ✅ 见 §8 |
 | 11 | 体检出的四个问题：同域判定 / 状态栏前景 / 文案 / 渲染进程兜底 | ✅ 见 §6.21–§6.23 |
 | 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
 | 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
@@ -539,7 +539,7 @@ adb shell pm install -r --user 0 <apk>     # 只装主用户
 ## 8. 知识库（本项目经验沉淀，开发前先查）
 
 本项目在 DSH 里挂了一个知识库：**手机软件开发知识库** `e1b49da1-ad61-4586-9333-ee4ec202e315`，
-覆盖 Android/Kotlin 工程知识（构建约束、WebView 外壳与 JS 桥、键盘避让、动画时序、ADB+CDP 调试、单测可测性）。
+覆盖 Android/Kotlin 工程知识（构建约束与 targetSdk 节奏、WebView 外壳与 JS 桥与安全基线、Android 16 迁移、键盘避让、动画时序、ADB+CDP 调试、测试分层、架构分层、敏感数据存放、性能验证）。
 已挂载到 `D:\DeepSeek Harness` 与本项目目录，`write_mode='audit'`。
 
 **开发前先查**：遇到「这个 Android 问题以前怎么解决的」「构建为什么失败」「真机行为怎么量」，先 `knowledge_search`，
@@ -551,9 +551,15 @@ adb shell pm install -r --user 0 <apk>     # 只装主用户
 | 脚本 | 用途 |
 |---|---|
 | `kb-ingest.mjs` | **只用于首次灌种子**：读 `kb/*.md` → 插件自己的函数渲染/哈希/切节 → 一个事务写 5 张表 + 落盘 md。`--dry` 只打印。**再次运行会新建重复条目** |
-| `kb-update.mjs` | **改库内容走这个**：读 `kb/updates/*.md`，逐篇走 `LocalKnowledgeProvider.update()` / `create()`，随后核对 entries / `knowledge_documents` / versions / passage。`--dry` 只打印 |
+| `kb-update.mjs` | **改库内容走这个**：读 `kb/updates/*.md`，逐篇走 `LocalKnowledgeProvider.update()` / `create()`，随后核对 entries / `knowledge_documents` / versions / passage。`--dry` 只打印。**加 `--only '<regex>'` 限定本次处理哪些文件** —— 不加会把这个目录里所有已入库的文档再各升一版 |
 | `kb-verify.mjs` | 全库核对：5 表计数、`validStructure` 校验、磁盘 md 能否解回、FTS 召回试探 |
 | `kb-mount.mjs` | 挂载到项目目录 |
+
+**每次改库前先备份**：`VACUUM INTO` 出一个快照（不要只靠 `.bak` 文件复制，WAL 模式下复制不安全）：
+
+```js
+new DatabaseSync(DB).exec(`VACUUM INTO 'C:/Users/yaoqi/.dsh/knowledge/snapshot-<时间戳>.sqlite'`)
+```
 
 `kb/updates/*.md` 的 front-matter：
 ```

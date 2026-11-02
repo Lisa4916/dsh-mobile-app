@@ -45,22 +45,18 @@ async function api(method, p, body) {
   return { status: res.status, json, text };
 }
 
-function changedFiles(base) {
-  const out = git(['diff', '--name-only', `${base}..HEAD`]);
+function changedFiles() {
+  // 本地比远端多出来的提交里改的文件
+  const out = git(['diff', '--name-only', 'e3e7552..HEAD']);
   return out ? out.split('\n').map((s) => s.trim()).filter(Boolean) : [];
 }
-
-const args = process.argv.slice(2);
-const BASE = args.find((a) => !a.startsWith('--')) || 'origin/master';
-const NO_TAG = args.includes('--no-tag');
 
 (async () => {
   const headSha = git(['rev-parse', 'HEAD']);
   const msg = git(['log', '-1', '--pretty=%s']);
   console.log('本地 HEAD =', headSha.slice(0, 7), '|', msg);
-  console.log('对比基准 =', BASE, '=', git(['rev-parse', '--short', BASE]));
 
-  const files = changedFiles(BASE);
+  const files = changedFiles();
   console.log('需要推送的文件：', files.length);
   if (!files.length) { console.log('没有差异，退出'); return; }
 

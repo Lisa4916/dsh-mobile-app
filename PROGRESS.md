@@ -26,6 +26,7 @@
 | 10 | 拆 `MainActivity`：抽 `RecoveryExecutor` / `CookieNames` / `ConnectionRepository` | ✅ | 全量 `tests=118 failures=0`；真机自愈 3 跳仍成立 |
 | 11 | 补 `androidTest`：`PageProbe` 判据拆成纯函数 + 真 WebView 取值验证 | ✅ | 真机 `OK (7 tests)`；`tests=118` |
 | 12 | 滑动返回不再闪侧栏（直接点屏外按钮，不展开侧栏） | ✅ | 真机 4 轮 `sideL` 全程 `-217` 不动；`tests=118`；lint 0/27 |
+| 13 | 知识库二次强化：纠 4 篇过时/错误结论 + 新增 3 篇 | ✅ | base 内 13 → 16 篇；`passage` 全部 `ready`；`kb-verify` 全绿 |
 
 **测试基线：JVM 单测全量 `tests=118 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
@@ -740,7 +741,69 @@ APK 7,485,956 B。
 
 ---
 
-## 下一步
+## 第 13 步：知识库二次强化 ✅
+
+目标不是「多加几篇」，而是**把被实测推翻的结论改掉、把只可意会的东西写成可执行判据**。过时的知识库比没有更危险：下一个人会照着错结论做出更贵的改动。
+
+### 13.1 为什么必须走 `LocalKnowledgeProvider.update()`
+
+插件 `lib/local-provider.js:900-934` 的 `updateEntry()` 只写 `knowledge_entries` / `knowledge_fts` / `knowledge_versions`，
+**不重写磁盘 `.md`、不重建 passage 索引**。直接 `UPDATE` 数据库会让 DB 与磁盘一致性地脱钩，
+下次插件启动按 DB 重写磁盘时又把改动覆盖回来，或者检索命中旧 passage。
+
+`provider.update()`（`local-provider.js:782-795`）才是官方路径：事务内改 entries，再 `syncKnowledgeEntryQueued()`
+重写 projection markdown（`knowledge_documents` + 磁盘），并让 passage 索引按 `body_hash` 重建。
+
+因此新建了 `tools/kb-update.mjs`：读 `kb/updates/*.md` 的 front-matter（`id` 可选 = 更新/新建），
+先离线校验「id 前缀唯一命中」+「`renderKnowledgeMarkdown` → `parseKnowledgeMarkdown` 往返正文一字不差」，
+再逐篇走 provider，最后复开只读 DB 核对 `body` 长度、`knowledge_documents.rel_path`、`versions` 条数、`passage.state`。
+
+> 踩坑：首版校验只喂 `"# title\n\nbody"` 给 `parseKnowledgeMarkdown`，报 `missing YAML front matter` ——
+> 它是**完整文档**解析器，必须先用 `renderKnowledgeMarkdown` 造出带 front-matter 的完整文档再往返。
+
+### 13.2 纠正的 4 篇（都是被实测推翻的）
+
+| 文档 | 旧结论（错） | 现结论 |
+|---|---|---|
+| 滑动返回/回主页 `d7618755` | 「侧栏收起时 `left=-199`，click 静默无效，必须先展开侧栏」 | **推翻**：DOM `click()` 不经命中测试，屏外照样生效；真问题是等待上限（实测需 ~1996ms / 54 轮 25ms） |
+| 握手自愈闸门 `0cb36dae` | 「自愈永远只清 `dsh-auth-*`，保留 `dsh_pocket_token`」；只有健康/坏两态 | 三态判据（`0`/`1`/`2`）+ **cookie 清理范围对照表**：PIN 页且 URL 有 `?token=` 时必须清 pocket cookie |
+| 登录态自愈 `eb3c513a` | 同上，且基线写 `EndpointTest 12 + HandshakeHealGateTest 10 = 22` | 收敛到「端口变了」这一种故障，指向 02 的对照表；基线改为四个类 46 例 |
+| 全量回归清单 `1d1c339c` | 第 6 节「已知未解项：`location.reload()` 回主页是体验硬伤」；`33 passed` | 该项**已解除**；基线改为 118 passed + 真机 `OK (7 tests)` + lint 0/27，并新增「仍然靠手工验证的 4 块」 |
+| ADB + CDP 调试 `f71d31a1` | 缺 PowerShell 毁 PNG、App 在后台、注入被拒等 | 补 5 条：`exec-out >` CRLF 毁 PNG、`mousedown`/`monkey -f`、`Document` 请求过滤、instrumented 崩渲染进程、`adb install -r -t`、无线调试实测走不通 |
+
+### 13.3 新增的 3 篇
+
+1. **点击注入的三层可信度**（`480e3091`，调试）：DOM click / 坐标点击 / system 级事件 的对照表。
+   含 MIUI 拒 `input tap` 的 logcat 原文（退出码仍是 0）、`monkey -f` 模板与 `Events injected` 判据、
+   CSS px × (屏幕宽/innerWidth) 换算、`element.focus()` 不唤 IME、**排查顺序 4 步**。
+2. **外部依赖的隐式契约**（`50051a9b`，架构）：把「会静默失效的耦合点」写成可检查的文档。
+   7 个耦合点四栏表（对方实现位置含行号 / 我方依赖的行为 / 失效症状 / 升级后检查命令）；
+   「什么时候该抽接口」的判据是**判错会造成不可逆损害吗**。
+3. **页面判据的可测化设计**（`09ca858e`，测试）：把 page probe 拆成「取值」与「判状态」两半。
+   `decodeJsString` 的 5 种转义、缺位 `\u` 不能吞字符、正文截断放 classify 里以便单测；
+   反面教材是「整段 JS 做 instrumented → `<no result>` + 进程崩溃」。
+
+### 13.4 结果
+
+```
+更新  01-home-return.md         d7618755 v2  3112字
+更新  02-handshake-gate.md      0cb36dae v2  3707字
+更新  03-login-state.md         eb3c513a v2  1578字
+更新  04-regression.md          1d1c339c v2  3057字
+新建  05-click-injection.md     480e3091 v1  3077字
+新建  06-integration-contract.md 50051a9b v1 2152字
+新建  07-page-probe.md          09ca858e v1  2542字
+更新  08-adb-cdp.md             f71d31a1 v3  6247字
+```
+
+- base 内条目 **13 → 16 篇**（新增 3 篇）；全库 entries/documents 均为 32。
+- `tools/kb-verify.mjs`：`passage_index` 全部 `ready`，`validStructure=valid`，磁盘 16 个 `.md` 全部可解析；
+  `versions` 31 条；FTS 召回正常（`monkey` / `契约` / `页面判据` / `maybeSeedAuthCookie` 都命中预期文档）。
+- 全库 `pending/failed` passage = **0**。
+
+> `.knowledge-base.yml` 在 `kb-verify` 里报「解析失败」是**预期行为**：它是 manifest（`renderKnowledgeBaseManifest` 格式），
+> 不是知识文档，走的是另一个解析器。不要把它当问题追。
+
 
 1. ~~真机验证第 7b 步自愈~~ ✅ 已完成（第 7d 步，CDP 抓到 `retry+token` 重连）。
 2. ~~第 7 步公网远程连接~~ ✅ 已完成（第 7e 步）：隧道开启、真机 4G 进主界面、公网下自愈与 ASK_USER 两支都实测。

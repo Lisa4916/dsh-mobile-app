@@ -98,7 +98,7 @@ dsh.lanPin=<token-lan 的内容>
 | 7c | 真机无线调试接入 | ❌ 放弃（配对成功但恒 offline，改走 USB） |
 | 7d | 真机 USB 接入 + 第 7b 步真机复验 | ✅ |
 | 7e | 公网隧道开启 + 真机 4G 验证 + ASK_USER 分支实测 | ✅ |
-| 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness` | ✅ 见 §10 |
+| 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness`；后续两次强化共 16 篇 | ✅ 见 §8 |
 | 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
 | 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
 
@@ -464,13 +464,37 @@ node .\tools\tap.cjs 540 613 8PCE7LJB99VG7TRO   # 坐标 + 序列号
 **开发前先查**：遇到「这个 Android 问题以前怎么解决的」「构建为什么失败」「真机行为怎么量」，先 `knowledge_search`，
 不要重新推一遍。库里每条都是本机实测结论，带环境标注。
 
-种子文档在 `kb/`（5 篇 Markdown），入库脚本在 `tools/`：
+种子文档在 `kb/`（5 篇 Markdown），**后续修订/新增放 `kb/updates/`**（front-matter 带 `id` = 更新该篇，省略 = 新建）。
+入库与更新脚本在 `tools/`：
 
 | 脚本 | 用途 |
 |---|---|
-| `kb-ingest.mjs` | 读 `kb/*.md` → 用插件自己的函数渲染/哈希/切节 → 一个事务写 5 张表 + 落盘 md。`--dry` 只打印 |
-| `kb-verify.mjs` | 入库核对：5 表计数、`validStructure` 校验、磁盘 md 能否解回、FTS 召回试探 |
+| `kb-ingest.mjs` | **只用于首次灌种子**：读 `kb/*.md` → 插件自己的函数渲染/哈希/切节 → 一个事务写 5 张表 + 落盘 md。`--dry` 只打印。**再次运行会新建重复条目** |
+| `kb-update.mjs` | **改库内容走这个**：读 `kb/updates/*.md`，逐篇走 `LocalKnowledgeProvider.update()` / `create()`，随后核对 entries / `knowledge_documents` / versions / passage。`--dry` 只打印 |
+| `kb-verify.mjs` | 全库核对：5 表计数、`validStructure` 校验、磁盘 md 能否解回、FTS 召回试探 |
 | `kb-mount.mjs` | 挂载到项目目录 |
+
+`kb/updates/*.md` 的 front-matter：
+```
+---
+id: d7618755      # 省略 = 新建；给出 = 更新该 id（前缀必须唯一命中）
+title: ...
+type: lesson      # preference | fact | decision | procedure | lesson
+tags: a,b,c
+confidence: 0.9
+group: 外壳
+---
+<正文，不含一级标题>
+```
+
+**为什么不能直接 `UPDATE knowledge_entries`**：`updateEntry()`（`lib/local-provider.js:900-934`）只写 entries/fts/versions，
+**不重写磁盘 `.md`、不重建 passage 索引**。直接改库会让 DB 与磁盘脱钩，下次插件同步时改动静默消失。
+`provider.update()`（同文件 `:782-795`）才是官方路径 —— 事务内改 entries，再 `syncKnowledgeEntryQueued()`
+重写 projection markdown（`knowledge_documents` + 磁盘），并让 passage 按 `body_hash` 重建。
+
+**校验写死一条**：`parseKnowledgeMarkdown` 是**完整文档**解析器（要求 YAML front-matter + 一级标题），
+不能只喂 `"# title\n\nbody"`（会报 `missing YAML front matter`）。正确做法是
+`parseKnowledgeMarkdown(renderKnowledgeMarkdown({metadata, title, body}))` 往返比对正文。
 
 **存储层事实（要改库内容必读）**：知识库后端是 `@lemoncat7/dsh-knowledge` v2.17.0
 （`C:\Users\yaoqi\.dsh\profiles\desktop\node_modules\@lemoncat7\dsh-knowledge\lib\`，ESM），

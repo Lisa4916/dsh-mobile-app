@@ -35,12 +35,13 @@
 | 19 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ | 真机 7 种层叠状态全通过（`tools/verify-back-layers.cjs`）；`tests=142`；lint 0/20 |
 | 20 | 第二台手机装机与收更新：版本号单一来源 + 局域网分发页 | ✅ | 手机侧 curl 下载 1,930,818 B，SHA-256 与清单一致；`adb install -r Success |
 | 21 | GitHub Release 发版：专用签名密钥 + tag 触发构建 | ✅ | Release `v0.2.0` 已发布；`releases/latest/download/dsh-remote-latest.apk` 实测 302→200、1,930,818 B，SHA-256 与 `SHA256SUMS.txt` 一致 |
-| 22 | 装完就能连：自动扫局域网找电脑，扫到只差 PIN | ✅ | 254 地址并发扫完 1.86 s 命中本机；单测 142 → 176；lint 0 error / 22 warning；真机待验（无在线设备） |
+| 22 | 装完就能连：自动扫局域网找电脑，扫到只差 PIN | ✅ | 254 地址并发扫完 1.86 s 命中本机；真机 `lan discovery done, found=1` 已复现；单测 142 → 176 |
+| 23 | 免 PIN 直进主界面：扫描时识别「这台电脑不需要 PIN」 | ✅ | 全新安装清数据后冷启动 522ms 直接落主界面，无 PIN 屏；单测 176 → 189；lint 0 error / 22 warning |
 
-**测试基线：JVM 单测全量 `tests=176 failures=0 errors=0 skipped=0`**
+**测试基线：JVM 单测全量 `tests=189 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
-`EndpointTest` 24 + `HandshakeHealGateTest` 10 + `HostMatchTest` 17 + `LanAdoptTest` 11 +
-`LanDiscoveryTest` 23 + `PageProbeTest` 20 + `RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
+`EndpointTest` 24 + `HandshakeHealGateTest` 10 + `HostMatchTest` 17 + `LanAdoptTest` 18 +
+`LanDiscoveryTest` 29 + `PageProbeTest` 20 + `RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
 **真机 instrumented：`PageProbeJsTest` 7 条 `OK (7 tests)`**（Redmi `8PCE7LJB99VG7TRO`，Android 15）
 **APK：`app-debug.apk` 7,365,924 B / `app-release.apk` 1,976,330 B**（versionName 0.1.0，versionCode 1）
 **lint：0 error / 22 warning**
@@ -1841,8 +1842,106 @@ LanDiscoveryTest 23 / PageProbeTest 20 / RecoveryExecutorTest 12 / RecoveryPlann
 
 ### 22.8 还没解决的
 
-- **全新安装 + 手机里没 PIN** 时，仍然要用户输一次 PIN。这是 dsh-pocket 设计决定的
-  （PIN 无接口可读），除非在电脑侧把 `lanAuthEnabled` 关掉让局域网免密
-  （`lib/index.js:336-339`）—— 那是降低安全性的选择，没做。
+- **全新安装 + 手机里没 PIN** 时仍然要用户输一次 PIN —— 已在**第 23 步**解决（电脑侧关掉
+  `lanAuthEnabled` + 手机侧扫到就识别免 PIN），见第 23 步。
 - 扫到多台电脑时只会 `AskPin` 第一台，没有「列出全部让用户挑」。多台场景在家里几乎不存在，
   先按最简处理。
+
+## 第 23 步：从 GitHub 装完直接进主界面，不再出现 PIN 屏 ✅
+
+用户：「下载后就是需要填写 pin 的那个界面，更新后要能直接进入主界面」
+「在 github 上下载更新后，要直接进入主界面」。
+
+第 22 步只做到「装完自动扫到电脑，然后弹一个输 PIN 的框」。用户要的是**扫到就直接进去**。
+
+### 23.1 为什么这件事只能在「电脑侧愿意放行」时才成立
+
+dsh-pocket 的 PIN 是**进程级密钥**（`~/.dsh/dsh-pocket/token-lan`），没有读取接口：
+
+| 想做的事 | 可行性 |
+|---|---|
+| 手机端从电脑探出 PIN | 不行 —— 未认证响应里没有它，且错 PIN 与无 PIN 的响应完全一样 |
+| 把 PIN 编进公开仓库的 Release 包 | 不行 —— 任何下载 APK 的人反编译就能拿到（第 21 步就是为了这个才不注入内置地址） |
+| 让电脑在局域网内免 PIN | **可以** —— dsh-pocket 官方提供了这个开关 |
+
+关键在 `dsh-pocket/lib/index.js:336-339`：
+
+```js
+isProtected: (host) => {
+  if (isLanOverrideHost(host)) return lanAuthEnabled();
+  return classifyHost(host) === 'public' ? true : lanAuthEnabled();
+}
+```
+
+局域网是否要 PIN 由 `lanAuthEnabled` 决定；**公网永远要 PIN**，这条不受影响。
+`lib/settings.mjs` 的文件头注释原文：「关闭后局域网扫码直连（仅同一网络内的设备能访问），
+公网不受影响（永远要密码）」。
+
+### 23.2 判据只能是「响应头里有没有 `dsh-auth-` 开头的 Set-Cookie」
+
+实测（本机 `192.168.50.58:3081`，裸 GET，不带 token 不带 cookie）：
+
+| `lanAuthEnabled` | 状态 | 正文长度 | title | Set-Cookie |
+|---|---|---|---|---|
+| `true` | 200 | 3969 | `DSH Pocket · 访问验证` | 无 |
+| `false` | 200 | 522 | `DSH Pocket · 正在进入 \| opening…` | **`dsh-auth-…=v1.…; Max-Age=2592000; HttpOnly; SameSite=Strict`** |
+
+挂上那张 cookie 再请求 → 200 / 47,868 B / `title=DeepSeek Harness`，是真实主界面。
+
+**所以不能看状态码、不能看长度、也不能看正文**：「访问验证」页与「正在进入」页正文里都带
+`DSH Pocket`，长度还会随状态漂移（4210 / 3969 / 522 都见过）。唯一稳的判据是响应头里
+有没有 `Set-Cookie: dsh-auth-…`。
+
+### 23.3 代码改动
+
+`LanDiscovery.kt`
+- 新增 `internal data class LanHit(val host: String, val open: Boolean)`
+- 新增 `LanScan.issuesCredential(rawResponse: String?): Boolean` —— **只看第一个 `\r\n\r\n` 之前**的响应头，
+  逐行找 `set-cookie:` 且含 `CookieNames.AUTH_PREFIX`（= `dsh-auth-`）。正文里出现
+  `Set-Cookie:` 字样不算。
+- `probe(host)` 返回 `LanHit?`，读循环的退出条件改成 `headerReady && looksLikePocket(...)` 两个都满足。
+  **少判 `headerReady`** 会让「响应头与正文被拆成两个 TCP 段」时偶然判成「要 PIN」。
+- `scan(...)` 的 `onFound` 回调改成 `(LanHit) -> Unit`。
+
+`LanAdopt.kt` —— `plan(saved, hits, port)` 判定顺序（注释里写了「为什么是这个顺序」）：
+1. hits 空 → `None`
+2. 任一 saved 的 host 与某 hit 相等（忽略大小写）→ `Adopt`（原样沿用旧档案，含 PIN 与端口）
+3. **恰好一台 `open`** → 构造 `http://<host>:3081/`（**不带 token**）→ `Adopt`
+4. 只有一台答话时，对每个 saved 试 `LanScan.rebind`（沿用旧 PIN，用于电脑换 IP）
+5. 其余 → `AskPin`
+
+`MainActivity.kt`：`lanFound` 由 `MutableList<String>` 改成 `MutableList<LanHit>`，
+`onLanScanDone` 传 `hits = lanFound.toList()`。
+
+### 23.4 单测（新增 13 条）
+
+`LanDiscoveryTest` 23 → **29**：`credential_trueForAuthCookie`、`credential_falseWithoutAnySetCookie`、
+`credential_falseForUnrelatedCookie`（`dsh_pocket_token` 不算登录凭据）、
+`credential_ignoresSetCookieLookingTextInsideBody`、`credential_matchesHeaderCaseInsensitively`、
+`credential_falseForNullAndEmpty`。
+
+`LanAdoptTest` 11 → **18**：`plan_adoptsOpenComputerWithoutAnySavedEntry`（断言 url 不含 `token=`）、
+`plan_openComputerGetsLanKindBadge`、`plan_openComputerWinsOverRebindingSavedPin`、
+`plan_exactHostMatchStillWinsOverOpenFlag`、`plan_doesNotGuessWhenTwoOpenComputersAnswer`、
+`plan_openAndLockedMixedPrefersTheOpenOne`、`plan_reportsOpenComputerInChattyForm`。
+
+### 23.5 真机验证（Redmi `8PCE7LJB99VG7TRO` / Android 15）
+
+```
+uninstall → install app-release.apk → pm clear → 冷启动
+LaunchState: COLD   TotalTime: 522
+mCurrentFocus=Window{... com.dsh.remote/com.dsh.remote.MainActivity}
+截图：直接是「探索未至之境 / 默认工作区 / 标准模式」主界面，**没有 PIN 屏**
+```
+
+电脑侧 `settings.json` 已改为 `"lanAuthEnabled": false`，备份在
+`settings.json.bak-20261102-225754`。公网（cloudflared）仍要 PIN，不受影响。
+
+### 23.6 代价与边界（记住了，别忘）
+
+- **局域网内任何设备**访问 `http://<电脑IP>:3081/` 都不用密码就能看到会话与文件。
+  家里 Wi-Fi 可信才行；不可信就把它改回 `true`（App 会退回「扫到 + 输 PIN」）。
+- 电脑侧开关一关，**手机上的档案也不需要改** —— 旧档案里带的 `?token=` 仍然有效，只是用不上。
+- 多台电脑都免 PIN 时不猜，仍然落到 `AskPin`。
+- 回归：`tests=189 failures=0 errors=0`（12 个测试类）；lint `0 error / 22 warning`；
+  `app-release.apk` **1,930,946 B**。

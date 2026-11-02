@@ -205,4 +205,69 @@ class LanDiscoveryTest {
         val fresh = LanScan.rebind(old, "192.168.50.77")
         assertTrue(fresh!!.lastUsedAt >= before)
     }
+
+    // ---------- issuesCredential ----------
+    //
+    // 「装完直接进主界面」全靠这一条判据。它判错的两种后果都很贵：
+    //  - 把「要 PIN」判成「免 PIN」→ App 直接 load 一个验证页，用户看到的是密码框，
+    //    而且不会有人告诉他可以手输；
+    //  - 把「免 PIN」判成「要 PIN」→ 明明能直接进，却把用户拦在 PIN 输入框前。
+    // 两个方向都要钉住。判据取自实测：裸 GET `/` 时，电脑端密码开着就没有 Set-Cookie，
+    // 关着就有 `dsh-auth-…`。
+
+    @Test
+    fun credential_trueForAuthCookie() {
+        val raw = "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/html; charset=utf-8\r\n" +
+            "Set-Cookie: dsh-auth-EsoXt=v1.eyJ2ZXJzaW9uIjoxfQ.sig; Max-Age=2592000; Path=/; HttpOnly\r\n" +
+            "\r\n" +
+            "<html><title>DSH Pocket · 正在进入</title></html>"
+        assertTrue(LanScan.issuesCredential(raw))
+    }
+
+    @Test
+    fun credential_falseWithoutAnySetCookie() {
+        // 访问验证页：密码开着时的真实响应，一个 Set-Cookie 都没有
+        val raw = "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/html; charset=utf-8\r\n" +
+            "Cache-Control: no-store\r\n" +
+            "\r\n" +
+            "<html><title>DSH Pocket · 访问验证</title></html>"
+        assertFalse(LanScan.issuesCredential(raw))
+    }
+
+    @Test
+    fun credential_falseForUnrelatedCookie() {
+        // 别的 cookie（比如 dsh_pocket_token 的历史值）不算登录凭据：
+        // dsh_pocket_token 是「已经过 PIN 页」之后的残留，它本身不能免掉 PIN
+        val raw = "HTTP/1.1 200 OK\r\n" +
+            "Set-Cookie: dsh_pocket_token=deadbeef; Path=/; HttpOnly\r\n" +
+            "\r\n" +
+            "<html></html>"
+        assertFalse(LanScan.issuesCredential(raw))
+    }
+
+    @Test
+    fun credential_ignoresSetCookieLookingTextInsideBody() {
+        // 正文里也可能出现 `Set-Cookie:` 字样（比如帮助文档），不能当成响应头
+        val raw = "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/html\r\n" +
+            "\r\n" +
+            "<pre>Set-Cookie: dsh-auth-fake=sig</pre>"
+        assertFalse(LanScan.issuesCredential(raw))
+    }
+
+    @Test
+    fun credential_matchesHeaderCaseInsensitively() {
+        val raw = "HTTP/1.1 200 OK\r\n" +
+            "set-cookie: dsh-auth-x=y; Path=/\r\n" +
+            "\r\nok"
+        assertTrue(LanScan.issuesCredential(raw))
+    }
+
+    @Test
+    fun credential_falseForNullAndEmpty() {
+        assertFalse(LanScan.issuesCredential(null))
+        assertFalse(LanScan.issuesCredential(""))
+    }
 }

@@ -68,13 +68,13 @@ class MainActivity : AppCompatActivity() {
     private var foundHost: String? = null
 
     /**
-     * 本轮扫描已命中的主机。
+     * 本轮扫描已命中的电脑。
      *
      * 为什么不「扫到一台就立刻连」：扫完才知道有没有第二台在 3081 上答话，
      * 而这直接决定「能不能把旧 PIN 搬过去」（多台时搬有可能连到别人家机器上，
      * 见 [LanAdopt]）。留到 onDone 一起判，代价只有不到两秒。
      */
-    private val lanFound = mutableListOf<String>()
+    private val lanFound = mutableListOf<LanHit>()
 
     /** 局域网扫描器。Activity 销毁时必须停手，否则退出后还在发 254 个 SYN。 */
     private val lanDiscovery = LanDiscovery()
@@ -221,7 +221,7 @@ class MainActivity : AppCompatActivity() {
 
         lanDiscovery.scan(
             localIp = localIp,
-            onFound = { host -> runOnUiThread { lanFound.add(host) } },
+            onFound = { hit -> runOnUiThread { lanFound.add(hit) } },
             onDone = { count ->
                 android.util.Log.i("DshRemote", "lan discovery done, found=$count")
                 runOnUiThread { onLanScanDone(manual) }
@@ -234,11 +234,12 @@ class MainActivity : AppCompatActivity() {
 
         val plan = LanAdopt.plan(
             saved = connections.all().sortedByDescending { it.lastUsedAt },
-            foundHosts = lanFound.toList(),
+            hits = lanFound.toList(),
         )
         when (plan) {
             is LanAdoptPlan.Adopt -> {
-                // 认识这台电脑（同 IP，或 PIN 能搬过去）：直接进，用户看不到任何中间页。
+                // 认识这台电脑（同 IP，或 PIN 能搬过去），或者这台电脑根本不需要 PIN
+                // （电脑端关掉了「局域网访问密码」）：直接进，用户看不到任何中间页。
                 applyList(connections.upsert(plan.endpoint))
                 connect(plan.endpoint, persist = false)
             }

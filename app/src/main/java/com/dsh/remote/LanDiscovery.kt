@@ -77,6 +77,38 @@ internal object LanScan {
     }
 
     /**
+     * 这次响应**是否直接发了登录凭据**（`Set-Cookie: dsh-auth-…`）。
+     *
+     * 这是「装完不用输 PIN 也能直接进」的判定依据。判的不是正文而是响应头，
+     * 原因是实测出来的三态（裸 GET `/`，不带任何 cookie、不带 token）：
+     *
+     * | 电脑侧局域网密码 | 状态码 | 正文 | `Set-Cookie` |
+     * |---|---|---|---|
+     * | **开着**（默认） | 200 | 访问验证页 `DSH Pocket · 访问验证` | **无** |
+     * | **关着** | 200 | 过渡页 `DSH Pocket · 正在进入` | **有 `dsh-auth-…`** |
+     *
+     * 注意第二行的正文同样是「DSH Pocket · 正在进入」，**光看正文分不开这两种情况**；
+     * 而挂上这张 cookie 再请求一次就拿到 `DeepSeek Harness` 主界面（实测 47,868 B）。
+     * 所以唯一可靠的判据是「服务器有没有主动发凭据」。
+     *
+     * 什么时候会出现免 PIN：电脑端关掉「局域网访问密码」
+     * （`~/.dsh/dsh-pocket/settings.json` 的 `lanAuthEnabled=false`，
+     * 网页端「设置 → 手机访问」里也有这个开关）。默认是开着的，
+     * 所以这条不是常态，而是**用户可选的一次性配置**。
+     */
+    fun issuesCredential(rawResponse: String?): Boolean {
+        val head = rawResponse ?: return false
+        // 只看响应头（第一个空行之前），避免把正文里出现的字符串误判
+        val headerEnd = head.indexOf("\r\n\r\n")
+        val headers = if (headerEnd >= 0) head.substring(0, headerEnd) else head
+        for (line in headers.lines()) {
+            if (!line.lowercase().startsWith("set-cookie:")) continue
+            if (line.contains(CookieNames.AUTH_PREFIX)) return true
+        }
+        return false
+    }
+
+    /**
      * 从入口 URL 的 query 里取 `token`，也就是 dsh-pocket 的访问 PIN。
      *
      * 自己解析而不用 `Uri.getQueryParameter`：这一层要能被纯 JVM 单测覆盖。
@@ -197,6 +229,15 @@ internal object LanScan {
 }
 
 /**
+ * 扫描命中的一台电脑。
+ *
+ * @param host 主机地址（不含端口）
+ * @param open **这台电脑不需要 PIN** —— 裸请求就下发了 `dsh-auth-…` 登录凭据
+ *   （电脑端关掉了「局域网访问密码」）。见 [LanScan.issuesCredential]。
+ */
+internal data class LanHit(val host: String, val open: Boolean)
+
+/**
  * 真正动手扫的执行器。**Android 侧**，因为要开 Socket。
  *
  * 设计约束：
@@ -216,12 +257,12 @@ internal class LanDiscovery {
      * 开始扫描。
      *
      * @param localIp 本机 IPv4（见 [LanScan.localIpv4]），null 时直接结束。
-     * @param onFound 每发现一台电脑回调一次，参数是主机地址（不含端口）。
+     * @param onFound 每发现一台电脑回调一次。
      * @param onDone 扫完回调，参数是发现总数。取消时**不会**回调。
      */
     fun scan(
         localIp: String?,
-        onFound: (String) -> Unit,
+        onFound: (LanHit) -> Unit,
         onDone: (Int) -> Unit,
     ) {
         cancel()
@@ -241,9 +282,10 @@ internal class LanDiscovery {
         for (host in hosts) {
             pool.execute {
                 try {
-                    if (!cancelled && probe(host)) {
+                    val hit = probe(host)
+                    if (!cancelled && hit != null) {
                         found.incrementAndGet()
-                        onFound(host)
+                        onFound(hit)
                     }
                 } catch (e: Throwable) {
                     // 单个地址的任何异常都不该终止整轮扫描
@@ -273,12 +315,16 @@ internal class LanDiscovery {
     }
 
     /**
-     * 探一台主机：连 3081，发一个最小 HTTP 请求，看正文是不是 dsh-pocket。
+     * 探一台主机：连 3081，发一个最小 HTTP 请求，看它是不是 dsh-pocket，
+     * 顺便从响应头判断这台电脑要不要 PIN。
      *
      * 用 `HTTP/1.0` + `Connection: close`：让服务端回完就断，不必自己解析
-     * `Content-Length` 或 chunked。我们只关心正文里那几个字，不关心结构。
+     * `Content-Length` 或 chunked。我们只关心正文里那几个字与响应头里的 `Set-Cookie`。
+     *
+     * 命中即返回（不必读完整个页面），但**必须把响应头读完**才知道要不要 PIN——
+     * 响应头一定在正文之前，所以第一轮读到的 4KB 里必然包含它。
      */
-    private fun probe(host: String): Boolean {
+    private fun probe(host: String): LanHit? {
         return try {
             Socket().use { socket ->
                 socket.connect(InetSocketAddress(host, LanScan.PORT), LanScan.CONNECT_TIMEOUT_MS)
@@ -301,13 +347,19 @@ internal class LanDiscovery {
                     if (n <= 0) break
                     total += n
                     sb.append(String(buf, 0, n, Charsets.UTF_8))
-                    // 命中就不必读完整个页面（4KB 的验证页读一两次就够）
-                    if (LanScan.looksLikePocket(sb.toString())) return true
+                    // 两个条件都满足才停：
+                    //  1. 响应头收全了（要读 Set-Cookie 判免 PIN，头没收全就判会误判成「要 PIN」）
+                    //  2. 正文已能认出是 dsh-pocket（不必等整个 4KB 页面）
+                    // 少判第 1 条会让「头与正文被拆成两个 TCP 段」的场景偶然失败。
+                    val headerReady = sb.indexOf("\r\n\r\n") >= 0
+                    if (headerReady && LanScan.looksLikePocket(sb.toString())) break
                 }
-                LanScan.looksLikePocket(sb.toString())
+                val raw = sb.toString()
+                if (!LanScan.looksLikePocket(raw)) return null
+                LanHit(host = host, open = LanScan.issuesCredential(raw))
             }
         } catch (e: IOException) {
-            false
+            null
         }
     }
 

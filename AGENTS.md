@@ -39,7 +39,7 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
-# 构建 + 单测（两条一起跑，基线 tests=176 failures=0）
+# 构建 + 单测（两条一起跑，基线 tests=189 failures=0）
 & 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
     -p 'D:\dsh-mobile-app' :app:assembleDebug :app:testDebugUnitTest --console=plain -q
 
@@ -106,6 +106,7 @@ dsh.lanPin=<token-lan 的内容>
 | 13 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ 见 §6.28 |
 | 14 | 第二台手机装机与收更新：版本号单一来源 + release 分发页 | ✅ 见 §6.29 |
 | 15 | 装完就能连：自动扫局域网找电脑，扫到只差 PIN | ✅ 见 §6.31 |
+| 16 | 免 PIN 直进主界面：扫描时识别「这台电脑不需要 PIN」 | ✅ 见 §6.32 |
 
 **第 7 项现状（2026-11-02 重测，旧结论已作废）**：`cloudflared.exe` 在
 `C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B，2026.10.7）。
@@ -728,6 +729,8 @@ CI 包里 `BuildConfig.DEFAULT_LAN_URL` 是空串（故意，防 PIN 进公开�
 2. **判据只能是正文含 `DSH Pocket` / `DeepSeek Harness`，不能用响应长度。**
    同一个「访问验证」页实测出现过 **4210 B 与 3969 B** 两种长度。
    不判正文的话，254 个地址里任何一个路由器后台都会被当成电脑。
+   **判「这台电脑免不免 PIN」则是另一件事，只能看响应头有没有 `Set-Cookie: dsh-auth-`**
+   （见 §6.32）—— 长度、状态码、正文都区分不出「访问验证」页与「正在进入」页。
 3. **`tokenOf` 必须先砍 fragment 再找 `?`。** `http://h/#?token=x` 里的 token 是 fragment 的，
    服务端根本收不到；反过来先找 `?` 就会把它当有效凭据。
 4. **`rebind` 必须带原 scheme。** `BootstrapUrl.build` 见到无 scheme 输入会补 `http://`，
@@ -749,6 +752,10 @@ PIN 是 dsh-pocket **进程级**的一把钥匙（`~/.dsh/dsh-pocket/token-lan`�
 
 所以扫描只解决「电脑在哪」，解决不了「PIN 是多少」。改进是把「跑到电脑前扫二维码」
 压缩成「输 8 位数字」，不是消灭这一步。
+
+**但要区分两种情况**：电脑侧把 `lanAuthEnabled` 关掉后，局域网完全免 PIN，
+裸 GET 就直接下发 `Set-Cookie: dsh-auth-…`；那种情况下扫描就能一路连到主界面，
+用户一次都不用输。判据与实现见 §6.32。
 
 #### 什么时候可以沿用旧 PIN
 
@@ -772,6 +779,61 @@ PIN 是 dsh-pocket **进程级**的一把钥匙（`~/.dsh/dsh-pocket/token-lan`�
 扫描过程与结果都打 `Log.i("DshRemote", "lan discovery done, found=N")`。
 真机上「没找到电脑」先看这行有没有出现：没出现说明根本没起扫描（多半不是 Wi-Fi），
 出现且 `found=0` 才是网络问题。
+
+### 6.32 免 PIN 直进主界面：判据只能是响应头里的 `Set-Cookie: dsh-auth-`
+
+用户要的是「从 GitHub 装完，第一屏就是主界面」，不是「扫到电脑再让我输 PIN」。
+这件事**只在电脑侧愿意放行时才成立**，App 自己变不出 PIN。
+
+#### 服务端依据（dsh-pocket v2.12.0）
+
+`lib/index.js:336-339`
+```js
+isProtected: (host) => {
+  if (isLanOverrideHost(host)) return lanAuthEnabled();
+  return classifyHost(host) === 'public' ? true : lanAuthEnabled();
+}
+```
+`lib/settings.mjs` 文件头注释：「关闭后局域网扫码直连（仅同一网络内的设备能访问），
+公网不受影响（永远要密码）」。开关存在 `~/.dsh/dsh-pocket/settings.json` 的
+`lanAuthEnabled`（默认 `true`），网页「设置 → 手机访问」也能切（RPC `setLanAuthEnabled`）。
+
+#### 判据：只能看响应头
+
+| `lanAuthEnabled` | 状态 | 正文长度 | title | `Set-Cookie` |
+|---|---|---|---|---|
+| `true` | 200 | 3969 | `DSH Pocket · 访问验证` | 无 |
+| `false` | 200 | 522 | `DSH Pocket · 正在进入 \| opening…` | **`dsh-auth-…`** |
+
+- **状态码没用**：两种情况都是 200。
+- **长度没用**：4210 / 3969 / 522 都见过，同一页面随状态漂。
+- **正文里的 `DSH Pocket` 没用**：两页都带。
+- 唯一稳的是响应头里有没有 `Set-Cookie: dsh-auth-`（`CookieNames.AUTH_PREFIX`）。
+
+实现是 `LanScan.issuesCredential(rawResponse)`：**只看第一个 `\r\n\r\n` 之前**，
+逐行 `lowercase().startsWith("set-cookie:")` 且该行含 `dsh-auth-`。
+正文里出现 `Set-Cookie:` 字样不算 —— 有专门的反面单测
+`credential_ignoresSetCookieLookingTextInsideBody`。
+
+`probe(host)` 的读循环退出条件必须是 `headerReady && looksLikePocket(...)` **两个都满足**；
+少判 `headerReady` 会在「响应头与正文被拆成两个 TCP 段」时偶然判成「要 PIN」。
+
+#### `LanAdopt.plan` 五步顺序（顺序本身就是结论）
+
+1. hits 空 → `None`；
+2. 任一已保存档案的 host 与某 hit 相同（忽略大小写）→ `Adopt` 旧档案（含 PIN 与端口，即使这台现在免 PIN 也不换）；
+3. **恰好一台 `open`** → 造 `http://<host>:3081/`（**不带 token**）→ `Adopt`；
+4. 只有一台答话时，对每个档案试 `LanScan.rebind`（沿用旧 PIN，处理电脑换 IP）；
+5. 其余 → `AskPin`。
+
+第 3 步排在第 4 步之前是有意的：电脑免 PIN 了就不该再搬一张没用的 token 进 URL
+（多带一个密钥进地址栏毫无收益）。
+
+#### 代价（改了就要记住）
+
+局域网内**任何设备**裸访问 `http://<电脑IP>:3081/` 都不用密码，直接能看到会话与文件。
+家里 Wi-Fi 可信才行；不可信就把 `lanAuthEnabled` 改回 `true`，App 会自动退回
+「扫到电脑 + 输 PIN」。公网（cloudflared 隧道）永远要 PIN，不受这个开关影响。
 
 ---
 

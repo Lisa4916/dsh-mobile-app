@@ -22,10 +22,11 @@
 | 7d | 真机 USB 接入 + 第 7b 步真机复验 | ✅ | CDP 抓到 `retry+token` 重连并恢复主界面 |
 | 7e | 公网隧道开启 + 真机 4G 验证 | ✅ | 4G 下 `title=DeepSeek Harness`；公网下自愈跳同样成立 |
 | 8 | 手机软件开发知识库（5 篇种子文档入库 + 挂载） | ✅ | entries/documents/fts = 5/5/5 |
+| 9 | 工程加固：截图出库 / PIN 去硬编码 / CI / 集成契约 / 文档纠错 | ✅ | 全量 `tests=69 failures=0`；`git ls-files` 无调试截图 |
 
-**测试基线：全量 `tests=59 failures=0 errors=0 skipped=0`**
-（`BackNavigationDeciderTest` 11 + `EndpointTest` 24 + `HandshakeHealGateTest` 10 + `RecoveryPlannerTest` 14）
-**APK：`app-debug.apk` 7,469,704 B（全量构建；增量构建会差约 40 KB，属 dex/资源打包顺序差异，不是回归）**（versionName 0.1.0，versionCode 1）
+**测试基线：全量 `tests=69 failures=0 errors=0 skipped=0`**
+（`BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `EndpointTest` 24 + `HandshakeHealGateTest` 10 + `RecoveryPlannerTest` 14）
+**APK：`app-debug.apk` 7,469,572 B（全量 `--rerun-tasks`；增量构建约 7,516,844 B，差异属 dex/资源打包顺序，不是回归）**（versionName 0.1.0，versionCode 1）
 
 ---
 
@@ -143,7 +144,7 @@ CDP 查出靠的是 `localStorage['dsh.sessions.current']`，与 URL 无关。
 
 - `3081` 由 `DeepSeek Harness.exe`（pid 10148）自己监听；`54282` 当前无监听，反代仍工作。
 - `settings.json`：`publicPinCustom=true`、`lanPinCustom=true` → **PIN 已固定，不再轮换**；
-  `token`(8 B) 与 `token-lan`(8 B) 都在，`DEFAULT_LAN_URL` 里的 `token=60111186` 就是 `token-lan`。
+  `token`(8 B) 与 `token-lan`(8 B) 都在，`DEFAULT_LAN_URL` 里的 `token=12345678` 就是 `token-lan`。
 - `tunnel-auto.json` 存在但当前没有 cloudflared 在跑，说明上次隧道未处在开启态。
 - `Endpoint.parseUri` 本来就接受 `https://`，公网地址不需要改解析逻辑。
 
@@ -324,7 +325,7 @@ Cookies 库恢复，那里还是旧的好值 —— 于是「重启 App」反而
 已弄脏            -> deadbeefdeadbeef…
 
 1. http://192.168.50.58:3081/                                   200
-2. http://192.168.50.58:3081/?token=60111186&dsh-pocket-retry=1  200  ← 自愈重连
+2. http://192.168.50.58:3081/?token=12345678&dsh-pocket-retry=1  200  ← 自愈重连
 3. http://192.168.50.58:3081/                                   200
 
 FINAL  title = DeepSeek Harness
@@ -492,6 +493,100 @@ W InputManager: Input event injection from pid 6369 failed.
 
 ---
 
+## 第 9 步：工程加固（按软件工程流程补的欠账）✅
+
+起因：做了一次架构与流程审计，暴露出几条「能跑但不像工程」的问题。
+下面按审计给出的优先级顺序执行，每条都记了**为什么它是问题**，避免以后有人改回去。
+
+### 9.1 62.7 MB 调试截图移出仓库 ✅
+
+**问题**：`.git` 总大小 66.1 MB，其中 62.7 MB 是仓库根目录的 25 个 `shot-*.png` 加一个 `ui.xml`
+（占 95%）。它们是排查过程中随手 `adb pull` 下来的，没有一次是交付证据。
+
+**处理**（文件没删，只是移出仓库范围）：
+
+```powershell
+# 1. 移到 build-artifacts/（该目录本来就被 .gitignore 忽略）
+$dest = 'D:\dsh-mobile-app\build-artifacts\shots'
+Move-Item shot-*.png $dest; Move-Item ui.xml $dest
+# 2. 取消跟踪，--cached 保证磁盘文件还在
+git rm --cached --quiet shot-*.png ui.xml
+```
+
+同时在 `.gitignore` 里加 `shot-*.png` / `shot-*.jpg` / `ui.xml`，并写明「需要长期留存的证据图放
+`docs/evidence/`，不要放根目录」。`docs/evidence/step7-public-4g.png`（3 MB）作为第 7 步的唯一证据**保留**。
+
+**注意**：这次只是让后续提交不再包含它们；`.git` 里的历史对象仍然占空间。
+要真正瘦身得 `git filter-repo` 重写历史 —— 因为已经推送过，属于破坏性操作，没有擅自做。
+
+### 9.2 局域网 PIN 不再硬编码 ✅
+
+**问题**：`MainActivity.kt` 里 `const val DEFAULT_LAN_URL = "http://192.168.50.58:3081/?token=12345678"`。
+`<PIN>` 是 dsh-pocket 的**局域网访问密码**，进公开仓库等于公开它；写死的 IP 还让「换电脑/换网段」直接报废。
+同一个 IP 也硬编码在 `network_security_config.xml` 的明文白名单里。
+
+**改法**：构建时注入 + 运行时兜底。
+
+| 层次 | 做法 |
+|---|---|
+| 取值 | `local.properties`（已 gitignore）的 `dsh.lanUrl` / `dsh.lanPin`；也支持 `-Pdsh.lanUrl=` 覆盖（CI 用） |
+| 注入 | `app/build.gradle.kts` 注入 **两个原始字段** `BuildConfig.LAN_HOST` / `LAN_PIN` |
+| 拼接 | `BootstrapUrl.build(host, pin)`（纯 JDK，`BootstrapUrlTest` 10 条钉住行为） |
+| 兜底 | 任一为空 → `DEFAULT_LAN_URL = ""` → App 直接落到连接列表走「扫码 / 手输」，**不假装有个能用的地址** |
+| 早失败 | 填了 `dsh.lanUrl` 却没填 `dsh.lanPin` → **构建直接失败**并说明原因 |
+
+**踩的坑（值得记）**：第一版让 Gradle 自己把 host+pin 拼成完整 URL 注入，结果拼漏了 `?token=`，
+注进去的是 `http://192.168.50.58:3081` —— App 连上去只会落到「访问验证」页，而且不报错。
+教训：**同一个逻辑不要在两处各写一遍**。现在 Gradle 侧只做「能不能解析」的校验（`validateLanHost`），
+拼装唯一归 `BootstrapUrl`，且被单测覆盖。
+
+顺带改的：`network_security_config.xml` 从「只放行 `192.168.50.58` 明文」改成全局允许明文。
+理由写进了那个文件：`<domain>` 只接受具体主机名、**不支持 CIDR**，写死一个私网 IP 等于换个网段就
+莫名其妙连不上，且失败现场是一条与被访问地址毫无关联的明文/SSL 错误。收紧的正确方向是让 dsh-pocket 走
+https，不是在配置里钉一个 IP。
+
+**注意**：`local.properties` 是本机真实值所在处，**不要提交**（`git check-ignore` 已确认被忽略）。
+
+### 9.3 GitHub Actions ✅
+
+`.github/workflows/ci.yml`，三个 job step：`assembleDebug` + `testDebugUnitTest --rerun-tasks` + `lintDebug`。
+
+- `--rerun-tasks` 是刻意的：不上缓存时也能保证测试真的跑过，避免 UP-TO-DATE 假装绿。
+- `lintDebug` 先量了基线再决定策略：实测 `0 error / 27 warning`（`UnusedResources` 9、`SetTextI18n` 8、
+  `GradleDependency` 3 等），AGP 默认 `abortOnError` 只对 error 生效，所以 **warnings 不挡合并、真 error 立刻挡**。
+- 另验了一条容易漏的：把 `local.properties` 改名后重跑 `--rerun-tasks`，`BUILD SUCCESSFUL` 且
+  `BuildConfig.LAN_HOST=""`。**CI 上没有真实地址也能过**，这条不验就会在第一次 push 时崩。
+
+### 9.4 写 `INTEGRATION.md` ✅
+
+App 依赖 dsh-pocket 一堆**内部细节**（cookie 名 `dsh_pocket_token` / `dsh-auth-*`、query 参数
+`?token=` / `dsh-pocket-retry=1`、页面文案 `访问验证` / `正在进入` / `受访问密码保护`），
+这些都不是公开 API，升级时会**静默失效**（不崩、不报错，只是某个自愈功能悄悄不工作）。
+
+`INTEGRATION.md` 把这些逐条列成表（App 侧字面量 ↔ dsh-pocket 侧位置 ↔ 语义 ↔ 坑），
+外加**升级后的人工检查清单**（6 条，都能在真机上验，不需要读源码）与遗留风险表。
+另外明确写了 App **不**依赖的东西（dsh web 端口、RPC 通道、`settings.json` 结构），免得以后有人误加依赖。
+
+### 9.5 修过期文档 ✅
+
+审计发现「文档比没有更危险」的地方：
+
+| 文件 | 原内容 | 更正 |
+|---|---|---|
+| `CONTEXT-ANCHOR.md:44` | Gradle 用 `gradle-9.4.1` | **必须 8.9**（9.4.1 与 AGP 8.7.3 不兼容），这条错记录曾让人白折腾一轮 |
+| `CONTEXT-ANCHOR.md:102` | 阻塞点「cloudflared 撞 sing-tun」 | **已证伪**：本机无 mihomo/clash 进程、无 TUN 网卡，precheck 全 PASS |
+| `CONTEXT-ANCHOR.md:20/65-71` | 明文写 IP 与 PIN、只记一台真机 | 改为构建注入 + 两台真机场景区分；PIN 不再进仓库文档 |
+| `README.md:36/91-92` | `tests=12`、APK `9,710,467 B`、`EndpointTest` 12 条 | 现为 `tests=69`、7,469,572 B、24 条；补全 5 个测试类与 5 个纯逻辑类 |
+| `README.md` 全文 | 完全没提 `RecoveryPlanner` / `HandshakeHealGate` / `BackNavigationDecider` / `BootstrapUrl` | 新增「自动恢复」整节 + 源码表补全 + 踩坑补 MIUI 触摸注入 / CRLF 毁 PNG / `$pid` 只读 |
+
+`AGENTS.md` 的实测部分一直是准的，未动事实，只补了第 9 步与新的构建参数说明。
+
+**验证**：`assembleDebug :app:testDebugUnitTest --rerun-tasks` → `BUILD SUCCESSFUL in 28s`，
+`tests=69 failures=0 errors=0 skipped=0`，APK 7,469,572 B；
+编译期仍只有两条既有 deprecated 警告（`ScanActivity.kt:108` / `:113` 的 `setTargetResolution`）。
+
+---
+
 ## 下一步
 
 1. ~~真机验证第 7b 步自愈~~ ✅ 已完成（第 7d 步，CDP 抓到 `retry+token` 重连）。
@@ -505,6 +600,13 @@ W InputManager: Input event injection from pid 6369 failed.
    `HandshakeHealGate` 在这条路径上的表现还没单独量。
 6. 真机身份已更正为 `ZY22GHMK5F`（motorola XT2335-3 / Android 14），
    后续验证以这台为准；Redmi 那台的记录只在 `kb/` 与 `CONTEXT-ANCHOR.md` 的历史环境标注里保留。
+   > 补充：**公网 4G 验收是在 Redmi `8PCE7LJB99VG7TRO` 上通过的**，XT2335-3 在 4G 下页面黑屏过一次并掉了 adb。
+   > 两台都能用，但写结论时要说清是哪台。
+7. **补 `androidTest`**（审计第 6 项）：现在只有 JVM 单测，WebView 同域判定、cookie 清除→重导航、
+   键盘 insets、扫码链路全无自动化，靠 `tools/*.cjs` 手跑。第一步建议用 MockWebServer 覆盖自愈链路。
+8. **拆 `MainActivity`**（审计第 7 项）：911 行 God Activity。纯逻辑已抽出五个类并有 69 条测试，
+   但 `healHandshakeIfNeeded()` 仍直读 `current`、直调 `webView.loadUrl`、直 toast，不可单测。
+   建议抽 `RecoveryExecutor`（动作执行）与 `ConnectionRepository`（档案读写）。
 
 命名隧道（固定域名）是第 7 步的可选项，需要 Cloudflare 账号 + 自有域名 + Tunnel Token，
 走 `tunnel.setConfig`；它解决的是「地址每次重开都变」这个体验问题，不是可用性问题。

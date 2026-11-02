@@ -12,6 +12,14 @@ captures/
 # 真机调试产物：帧序列、录屏、拉下来的 framework-res.apk 很大，不入库
 build-artifacts/
 
+# 调试截图与控件树快照：一次性排查产物，不入库。
+# 曾在仓库根目录误提交 25 个 shot-*.png + ui.xml，占 .git 的 95%（62.7 MB / 66.1 MB），
+# 已用 `git rm --cached` 取消跟踪并把文件移到 build-artifacts/shots/（本地保留）。
+# 需要长期留存的证据图放 docs/evidence/，不要放根目录。
+shot-*.png
+shot-*.jpg
+ui.xml
+
 # IDE
 .idea/
 *.iml

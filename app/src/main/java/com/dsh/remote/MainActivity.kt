@@ -111,8 +111,13 @@ class MainActivity : AppCompatActivity() {
     /**
      * 开机自动连接。
      *
-     * 优先用最后使用过的连接；一个都没有时，用内置的本机示例地址建档并连过去——
-     * 用户第一次装完 App 打开就是 DSH 界面，不用先扫码或粘地址。
+     * 优先用最后使用过的连接；一个都没有时，用**构建时注入**的本机示例地址建档并连过去。
+     *
+     * 注入值来自 `local.properties` 的 `dsh.lanUrl` / `dsh.lanPin`（不进仓库，见
+     * [BootstrapUrl] 的注释）。没有注入时 [BuildConfig.DEFAULT_LAN_URL] 是空串，
+     * 这里会退回连接列表并走「扫码 / 手输」引导 —— **这是故意的**：
+     * 内置一个写死的 `?token=` 既会泄漏 dsh-pocket 的局域网 PIN，也会在换网段后
+     * 变成一个连不上的地址，让用户以为是网络故障。
      */
     private fun autoconnect() {
         val known = store.lastUsed()
@@ -355,7 +360,8 @@ class MainActivity : AppCompatActivity() {
         })
 
         inputUrl = EditText(this).apply {
-            hint = "http://192.168.50.58:3081/?token=…"
+            // 全局示例，不写具体 IP：写死某个地址会让用户以为「必须连这台」。
+            hint = "http://电脑IP:3081/?token=…"
             textSize = 14f
             isSingleLine = false
             maxLines = 3
@@ -380,6 +386,9 @@ class MainActivity : AppCompatActivity() {
         // 调试/快速上手用：把上次 dsh-pocket 的局域网入口填进去。
         // 存在的理由不是省事，而是中文输入法下 adb/手工输入长 URL 极易出错，
         // 一个「填入」按钮能让用户先跑通链路，再改端口。
+        //
+        // 地址来自构建时注入（local.properties 的 dsh.lanUrl/dsh.lanPin，不进仓库）。
+        // **没注入就直接不显示这个按钮** —— 给一个空串让用户「填入」比没有按钮更糟。
         val fillBtn = Button(this).apply {
             text = "填入本机示例"
             setOnClickListener {
@@ -388,7 +397,9 @@ class MainActivity : AppCompatActivity() {
                 toast("已填入，按「连接」")
             }
         }
-        column.addView(fillBtn)
+        if (DEFAULT_LAN_URL.isNotBlank()) {
+            column.addView(fillBtn)
+        }
 
         val scanBtn = Button(this).apply {
             text = "扫码连接"
@@ -803,8 +814,19 @@ class MainActivity : AppCompatActivity() {
         val INK = 0xFF111318.toInt()
         val INK_DIM = 0xFF5A6070.toInt()
         val SURFACE = 0xFFFFFFFF.toInt()
-        /** 本机 dsh-pocket 的默认局域网入口；端口/PIN 变了在这里改。 */
-        const val DEFAULT_LAN_URL = "http://192.168.50.58:3081/?token=60111186"
+
+        /**
+         * 首次启动时尝试自动连接的地址，**构建时注入**：
+         * `local.properties` 里的 `dsh.lanUrl` + `dsh.lanPin`（`app/build.gradle.kts`
+         * 注入两个原始字段，由 [BootstrapUrl.build] 拼成完整 URL）。
+         *
+         * 没填时这里是空串，App 直接落到连接列表走「扫码 / 手输」引导。
+         *
+         * 历史：这里原来是 `"http://192.168.50.58:3081/?token=12345678"`，
+         * 硬编码的 PIN 等于把 dsh-pocket 的局域网访问密码写进公开仓库，
+         * 写死的 IP 也让它换网段就报废。**别再把它写回来。**
+         */
+        val DEFAULT_LAN_URL: String = BootstrapUrl.build(BuildConfig.LAN_HOST, BuildConfig.LAN_PIN).orEmpty()
 
         /**
          * 单帧键盘高度跨度超过这个像素数，判定为「系统塞进来的终值」。

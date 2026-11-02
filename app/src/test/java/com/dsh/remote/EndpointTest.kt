@@ -14,7 +14,7 @@ class EndpointTest {
 
     @Test
     fun parseUri_acceptsLanHttp() {
-        val url = "http://192.168.50.58:3081/?token=60111186"
+        val url = "http://192.168.50.58:3081/?token=12345678"
         assertEquals(url, Endpoint.parseUri(url))
     }
 
@@ -40,7 +40,7 @@ class EndpointTest {
 
     @Test
     fun host_extracted() {
-        val e = Endpoint("1", "本机", "http://192.168.50.58:3081/?token=60111186")
+        val e = Endpoint("1", "本机", "http://192.168.50.58:3081/?token=12345678")
         assertEquals("192.168.50.58", e.host)
     }
 

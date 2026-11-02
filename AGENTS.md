@@ -39,7 +39,7 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
-# 构建 + 单测（两条一起跑，基线 tests=59 failures=0）
+# 构建 + 单测（两条一起跑，基线 tests=69 failures=0）
 & 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
     -p 'D:\dsh-mobile-app' :app:assembleDebug :app:testDebugUnitTest --console=plain -q
 
@@ -47,6 +47,16 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 & 'D:\AndroidDev\sdk\platform-tools\adb.exe' -s ZY22GHMK5F install -r `
     'D:\dsh-mobile-app\app\build\outputs\apk\debug\app-debug.apk'
 ```
+
+**内置连接地址**（`local.properties`，已 gitignore，不进仓库）：
+
+```properties
+dsh.lanUrl=192.168.50.58:3081
+dsh.lanPin=<token-lan 的内容>
+```
+
+不填也能构建、也能用（App 落到连接列表走扫码/手输）。
+**`MainActivity` 里不再有任何写死的 IP 或 PIN —— 别再写回去。** 详见 §6.19。
 
 | 项 | 值 |
 |---|---|
@@ -144,15 +154,25 @@ app/src/main/java/com/dsh/remote/
 │                        ⚠ 铁律：URL 里没有 ?token= 时**不许**清 dsh_pocket_token，
 │                          否则用户被永久锁在「访问验证」页外（单测钉住）
 ├── ScanActivity.kt      CameraX 预览 + ZXing 解码，只认真 http(s) 结果
+├── BootstrapUrl.kt      host+PIN → 完整 URL（纯 JDK）。Gradle 只注入两个原始字段，
+│                        **拼装只在这里做一次**，别再在 build.gradle.kts 里重写一遍
+│                        （踩过：Gradle 那份拼漏 ?token=，App 静默落到「访问验证」页）
 ├── EndpointTest.kt      24 条单测：解析、序列化往返、脏数据容错、id 稳定性、
 │                          入口类型推断（网段边界 / IPv6 私有 / CGNAT / mapped-v4）、
 │                          4 列老数据的升级兼容
+├── BootstrapUrlTest.kt  10 条单测：拼接、scheme/尾斜杠容错、空值返回 null、
+│                          旧 ?token= 不叠加、PIN 特殊字符编码
 └── RecoveryPlannerTest.kt 14 条单测：fromProbe 映射、plan 分支穷举、hasPinToken
                            只认 query 里的 token、withRetry 幂等与 fragment 位置
 ```
 
 `res/values/`：`page_dark = #151517`（**必须与 DSH 页面 body 同色**，见 §6.2）、`surface`、`ink`、`ink_dim`、`brand`。
 `AndroidManifest.xml`：`INTERNET`、`usesCleartextTraffic="true"`（目标是局域网 http 明文）、`network_security_config`。
+
+`res/xml/network_security_config.xml`：**全局允许明文**（不是只放行某个 IP）。
+原因写在该文件注释里：`<domain>` 只接受具体主机名、**不支持 CIDR**，钉死一个私网 IP 等于换个网段
+就莫名其妙连不上，且失败现场是一条与被访问地址毫无关联的明文/SSL 错误。
+收紧的正确方向是让 dsh-pocket 走 https，不是在这里钉 IP。
 
 ---
 
@@ -232,7 +252,8 @@ App 重装后 `webview_devtools_remote_<pid>` 名字会变。
 直接跑 `node tools/cdp-forward.cjs` 会自动做这件事。
 
 ### 6.9 `adb shell input text` 在中文输入法下吞字符
-`http` 会变成 `p://`，分字符注入也失败。所以 App 里有「填入本机示例」按钮（`DEFAULT_LAN_URL` 常量），地址由代码写，不经过输入法。
+`http` 会变成 `p://`，分字符注入也失败。所以 App 里有「填入本机示例」按钮（读 `DEFAULT_LAN_URL`，值为构建时注入），
+地址由代码写，不经过输入法。**按钮只在注入值非空时出现** —— 给用户一个空串「填入」比没有按钮更糟。
 
 ### 6.10 `adb input tap` 坐标要按密度换算
 CSS px × `(1080 / window.innerWidth)` = ×2.748。用 CSS 值直接点会全部落空。
@@ -404,7 +425,7 @@ node .\tools\tap.cjs 540 613 8PCE7LJB99VG7TRO   # 坐标 + 序列号
 ## 9. 非目标
 
 - **不重写 DSH 前端**（§0 三条依据）。
-- **不改 `dsh-pocket`**。它是外部组件，本仓库只消费它的 :3081 页面。
+- **不改 `dsh-pocket`**。它是外部组件，本仓库只消费它的页面。**但它与我们的耦合面必须登记**，见 §11。
 - **不引入 Compose**。UI 量很小（一个列表 + 一个 WebView + 一个扫码页），命令式 View 够用，且能精确控制 WebView 与 insets。
 - **不做 root / 不改系统**。所有避让都靠 WindowInsets + 页面 CSS。
 
@@ -416,4 +437,37 @@ node .\tools\tap.cjs 540 613 8PCE7LJB99VG7TRO   # 坐标 + 序列号
 |---|---|
 | `D:\mobile-android`（netacc-android） | 无关。只是同一个作者的另一条 Android 线，构建环境的坑可互相参考 |
 | `D:\network-manager` | 无关。Python + Tk 桌面版 |
-| `dsh-pocket`（`~/.dsh/profiles/desktop/node_modules/dsh-pocket`） | **本项目的上游依赖**，提供 :3081 反代与认证 |
+| `dsh-pocket`（`~/.dsh/profiles/desktop/node_modules/dsh-pocket`） | **本项目的上游依赖**，提供反代与认证。耦合面见 `INTEGRATION.md` |
+
+---
+
+## 11. 工程红线（审计后新增，别退回去）
+
+### 11.1 仓库里不出现调试截图
+`.git` 曾因根目录 25 个 `shot-*.png` + `ui.xml` 膨胀到 66.1 MB（截图占 62.7 MB / 95%）。
+现在 `.gitignore` 拦 `shot-*.png` / `shot-*.jpg` / `ui.xml`。
+**需要长期留存的证据图放 `docs/evidence/`**，且只放真正对外的验收证据（现在只有 `step7-public-4g.png`）。
+
+### 11.2 仓库里不出现真实 IP 与 PIN
+`MainActivity` 的 `DEFAULT_LAN_URL` 曾硬编码 `http://192.168.50.58:3081/?token=12345678`，
+等于把 dsh-pocket 的局域网访问密码公开。现在：
+
+- 值来自 `local.properties`（已 gitignore）的 `dsh.lanUrl` / `dsh.lanPin`；
+- `app/build.gradle.kts` 注入 `BuildConfig.LAN_HOST` / `LAN_PIN`；
+- `BootstrapUrl.build()` 拼成完整 URL；任一为空 → 空串 → App 走扫码引导。
+
+文档里也不要写具体 IP 与 PIN（`CONTEXT-ANCHOR.md` 已按这条重写）。
+
+### 11.3 同一个逻辑不要在两处各写一遍
+第一版让 Gradle 自己拼完整 URL 注入，结果漏掉 `?token=`，
+注进去的是 `http://192.168.50.58:3081` —— App 连上去只落到「访问验证」页，**不报错、不崩**。
+现在 Gradle 侧只做 `validateLanHost()` 校验（能不能解析出 host），拼装唯一归 `BootstrapUrl`，
+行为由 `BootstrapUrlTest` 10 条钉住。
+
+### 11.4 CI 必须能在「没有真实地址」的环境下过
+`.github/workflows/ci.yml` 跑 `assembleDebug` + `testDebugUnitTest --rerun-tasks` + `lintDebug`。
+验证方法：把 `local.properties` 改名后 `--rerun-tasks` 重跑，必须 `BUILD SUCCESSFUL` 且
+`BuildConfig.LAN_HOST=""`。这条不验，第一次 push 就会红。
+
+lint 基线：**0 error / 27 warning**（`UnusedResources` 9、`SetTextI18n` 8、`GradleDependency` 3、
+`MonochromeLauncherIcon` 2、其余各 1）。AGP 默认 `abortOnError` 只对 error 生效，所以 warnings 不挡合并。

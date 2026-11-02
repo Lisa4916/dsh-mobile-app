@@ -49,7 +49,7 @@ class RecoveryPlannerTest {
     fun plan_healthyDoesNothing() {
         assertEquals(
             RecoveryAction.NONE,
-            RecoveryPlanner.plan(PageState.HEALTHY, "http://192.168.50.58:3081/?token=60111186"),
+            RecoveryPlanner.plan(PageState.HEALTHY, "http://192.168.50.58:3081/?token=12345678"),
         )
     }
 
@@ -57,7 +57,7 @@ class RecoveryPlannerTest {
     fun plan_unknownDoesNothing() {
         assertEquals(
             RecoveryAction.NONE,
-            RecoveryPlanner.plan(PageState.UNKNOWN, "http://192.168.50.58:3081/?token=60111186"),
+            RecoveryPlanner.plan(PageState.UNKNOWN, "http://192.168.50.58:3081/?token=12345678"),
         )
     }
 
@@ -81,7 +81,7 @@ class RecoveryPlannerTest {
     fun plan_pinPageWithTokenInUrlClearsPocketCookie() {
         assertEquals(
             RecoveryAction.CLEAR_POCKET_COOKIE,
-            RecoveryPlanner.plan(PageState.PIN_REQUIRED, "http://192.168.50.58:3081/?token=60111186"),
+            RecoveryPlanner.plan(PageState.PIN_REQUIRED, "http://192.168.50.58:3081/?token=12345678"),
         )
     }
 
@@ -117,20 +117,20 @@ class RecoveryPlannerTest {
 
     @Test
     fun hasPinToken_readsQueryOnly() {
-        assertTrue(RecoveryPlanner.hasPinToken("http://h:3081/?token=60111186"))
-        assertTrue(RecoveryPlanner.hasPinToken("http://h:3081/?a=1&token=60111186&b=2"))
-        assertTrue(RecoveryPlanner.hasPinToken("http://h:3081/?token=60111186#frag"))
+        assertTrue(RecoveryPlanner.hasPinToken("http://h:3081/?token=12345678"))
+        assertTrue(RecoveryPlanner.hasPinToken("http://h:3081/?a=1&token=12345678&b=2"))
+        assertTrue(RecoveryPlanner.hasPinToken("http://h:3081/?token=12345678#frag"))
     }
 
     @Test
     fun hasPinToken_ignoresFragmentsAndOtherKeys() {
         assertTrue(
             "fragment 里的 token 不是 query，不算",
-            !RecoveryPlanner.hasPinToken("http://h:3081/#token=60111186"),
+            !RecoveryPlanner.hasPinToken("http://h:3081/#token=12345678"),
         )
         assertTrue(
             "键名必须完全等于 token，mytoken 不算",
-            !RecoveryPlanner.hasPinToken("http://h:3081/?mytoken=60111186"),
+            !RecoveryPlanner.hasPinToken("http://h:3081/?mytoken=12345678"),
         )
         assertTrue(!RecoveryPlanner.hasPinToken("http://h:3081/"))
         assertTrue(!RecoveryPlanner.hasPinToken(""))

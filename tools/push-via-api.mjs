@@ -15,6 +15,13 @@ function git(args) {
   return execFileSync('git', args, { cwd: ROOT, encoding: 'utf8' }).trim();
 }
 
+// 取「git 里那一份」内容，不是工作区那一份。
+// 工作区文件在 Windows 上是 CRLF（core.autocrlf=true），而 git 对象里是 LF；
+// 直接读工作区会把 CRLF 推上去，远端树和本地树就会对不上。
+function gitBlob(revPath) {
+  return execFileSync('git', ['cat-file', 'blob', revPath], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 });
+}
+
 function token() {
   const out = execFileSync('git', ['credential', 'fill'], {
     cwd: ROOT,
@@ -45,19 +52,43 @@ async function api(method, p, body) {
   return { status: res.status, json, text };
 }
 
-function changedFiles() {
-  // 本地比远端多出来的提交里改的文件
-  const out = git(['diff', '--name-only', 'e3e7552..HEAD']);
+function changedFiles(base) {
+  const out = git(['diff', '--name-only', `${base}..HEAD`]);
   return out ? out.split('\n').map((s) => s.trim()).filter(Boolean) : [];
 }
+
+// 全量同步时用：HEAD 里所有被跟踪的文件，带 git 的 mode
+// **mode 必须照抄**：`gradlew` 是 100755，统一写 100644 会让远端树与本地树对不上，
+// 而 CI 里 `./gradlew` 正好需要那个可执行位。
+function trackedFiles() {
+  const out = git(['ls-tree', '-r', 'HEAD']);
+  return out
+    ? out.split('\n').map((line) => {
+        const m = /^(\d+)\s+\w+\s+[0-9a-f]+\t(.+)$/.exec(line.trim());
+        return m ? { path: m[2], mode: m[1] } : null;
+      }).filter(Boolean)
+    : [];
+}
+
+function modeOf(file) {
+  if (typeof file === 'object') return file.mode;
+  const line = git(['ls-tree', 'HEAD', '--', file]);
+  const m = /^(\d+)\s/.exec(line);
+  return m ? m[1] : '100644';
+}
+
+const args = process.argv.slice(2);
+const BASE = args.find((a) => !a.startsWith('--')) || 'origin/master';
+const NO_TAG = args.includes('--no-tag');
+const ALL = args.includes('--all');   // 全量重推所有被跟踪文件（修 CRLF 污染过的远端树）
 
 (async () => {
   const headSha = git(['rev-parse', 'HEAD']);
   const msg = git(['log', '-1', '--pretty=%s']);
   console.log('本地 HEAD =', headSha.slice(0, 7), '|', msg);
 
-  const files = changedFiles();
-  console.log('需要推送的文件：', files.length);
+  const files = ALL ? trackedFiles() : changedFiles(BASE);
+  console.log(ALL ? `全量模式：${files.length} 个文件` : `对比基准 ${BASE}：${files.length} 个文件`);
   if (!files.length) { console.log('没有差异，退出'); return; }
 
   const remote = await api('GET', `/repos/${OWNER}/${REPO}/git/ref/heads/master`);
@@ -65,23 +96,27 @@ function changedFiles() {
   console.log('远端 HEAD =', baseCommitSha.slice(0, 7));
 
   const baseCommit = await api('GET', `/repos/${OWNER}/${REPO}/git/commits/${baseCommitSha}`);
-  const baseTreeSha = baseCommit.json.tree.sha;
+  // 全量模式不要 base_tree：否则远端独有的旧文件会残留
+  const treeBody = ALL ? { tree: [] } : { base_tree: baseCommit.json.tree.sha, tree: [] };
 
   const tree = [];
   for (const f of files) {
-    const abs = path.join(ROOT, f);
-    const content = fs.readFileSync(abs);
+    const rel = typeof f === 'object' ? f.path : f;
+    const mode = modeOf(f);
+    const content = gitBlob(`HEAD:${rel}`);         // ← 用 git 对象里的字节，避开 CRLF
     const blob = await api('POST', `/repos/${OWNER}/${REPO}/git/blobs`, {
       content: content.toString('base64'),
       encoding: 'base64',
     });
-    if (blob.status !== 201) throw new Error(`blob ${f} -> ${blob.status} ${blob.text}`);
-    tree.push({ path: f.replace(/\\/g, '/'), mode: '100644', type: 'blob', sha: blob.json.sha });
-    console.log('  blob ok', f, content.length, 'B');
+    if (blob.status !== 201) throw new Error(`blob ${rel} -> ${blob.status} ${blob.text}`);
+    tree.push({ path: rel.replace(/\\/g, '/'), mode, type: 'blob', sha: blob.json.sha });
   }
+  console.log(`  ${tree.length} 个 blob 已上传`);
 
-  const newTree = await api('POST', `/repos/${OWNER}/${REPO}/git/trees`, { base_tree: baseTreeSha, tree });
+  const newTree = await api('POST', `/repos/${OWNER}/${REPO}/git/trees`, { ...treeBody, tree });
   if (newTree.status !== 201) throw new Error(`tree -> ${newTree.status} ${newTree.text}`);
+  const localTree = git(['rev-parse', 'HEAD^{tree}']);
+  console.log('新 tree =', newTree.json.sha, localTree === newTree.json.sha ? '（与本地树一致 ✅）' : `（本地树 ${localTree}，不一致 ⚠）`);
 
   const newCommit = await api('POST', `/repos/${OWNER}/${REPO}/git/commits`, {
     message: git(['log', '-1', '--pretty=%B']),

@@ -676,6 +676,30 @@ https://github.com/<owner>/<repo>/releases/latest/download/dsh-remote-latest.apk
 **注意这意味着 debug 包与 release 包不再能互相覆盖** —— 手机上若还装着旧 debug 证书的版本，
 换到新证书的 release 必须先卸载一次。
 
+**已落地**：仓库 `https://github.com/Lisa4916/dsh-mobile-app`（public），
+Release `https://github.com/Lisa4916/dsh-mobile-app/releases/tag/v0.2.0` 已发布
+`dsh-remote-0.2.0-2.apk` / `dsh-remote-latest.apk` / `SHA256SUMS.txt` 三个资产。
+手机端固定地址实测 `302 → 302 → 200`，下载 1,930,818 B，
+SHA-256 `b10f01536c8a187be776d618c4bd9084421453e3e6f95bf5b4a6ce85cd2770f8` 与清单一致。
+
+#### 首次跑 CI 撞的三个坑（都是真失败，不是环境抖动）
+
+1. **`setup-android` 默认的 `tools` 包已被移除。** `android-actions/setup-android@v3`
+   默认 `packages: tools platform-tools`，cmdline-tools 16.0 里没有 `tools`：
+   `Warning: Failed to find package 'tools'` → `sdkmanager` exit 1 → **三个 job 全卡在
+   Set up Android SDK**。必须显式 `packages: 'platform-tools'`。
+2. **`apksigner` 不在 PATH 上。** 它在 **build-tools**，不在 platform-tools；
+   setup 步骤只装 platform-tools 时，Verify 步骤会 `apksigner: command not found`（exit 127）。
+   从 `$ANDROID_HOME/build-tools/*/apksigner` 取 `sort -V | tail -n1`，找不到就报错并列目录。
+3. **`github.com:443` 的 TLS 可能整体不可用，而 API 正常。** 本机 `github.com` 解析到
+   `198.18.0.13`（代理 fake-IP），`api.github.com` / `codeload` / `raw.githubusercontent.com`
+   都通，唯独 `github.com` 直连、HTTP 代理、SOCKS5、换 `--resolve` 指定官方 IP 全部
+   `schannel: failed to receive handshake` / `OpenSSL: unexpected eof while reading`。
+   这时 `git push` / `git ls-remote` 一律不可用，但 **Contents API 可以照常提交**：
+   `PUT /repos/{owner}/{repo}/contents/{path}` 逐文件提交，再
+   `POST /git/tags` + `PATCH /git/refs/tags/vX.Y.Z` 把 annotated tag 重指到新提交。
+   **发版前先探一句 `git ls-remote origin`**，不通就别指望 `publish-release.cjs` 能推上去。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）

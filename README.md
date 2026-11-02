@@ -240,11 +240,20 @@ node tools\publish-apk.cjs --bump patch   # 版本号 +1，重新构建发布
 上面那套要求电脑开着、两台设备同一 Wi-Fi。走 GitHub 之后，手机只需要**一个固定网址**：
 
 ```
-https://github.com/<owner>/<repo>/releases/latest/download/dsh-remote-latest.apk
+https://github.com/Lisa4916/dsh-mobile-app/releases/latest/download/dsh-remote-latest.apk
 ```
 
 这个地址永远指向最新一个 Release 的同名 asset。存成手机浏览器书签，
 以后电脑这边推一个 tag，手机上刷新就是新版。
+
+**这条通道已经跑通了**：仓库 `Lisa4916/dsh-mobile-app`（public），
+Release `v0.2.0` 已发布 `dsh-remote-0.2.0-2.apk` / `dsh-remote-latest.apk` / `SHA256SUMS.txt`。
+上面那个链接实测 `302 → 302 → 200`，下载 1,930,818 B，
+SHA-256 `b10f0153…cd2770f8` 与 `SHA256SUMS.txt` 一致；
+`aapt2` 确认 `versionCode='2' versionName='0.2.0'`，签名是 `CN=DSH Remote`。
+
+> 本机 `github.com:443` 的 TLS 有时被拦（`api.github.com` 却正常），这时 `git push` 会挂。
+> 发版前先 `git ls-remote origin` 探一下；不通就修代理规则，或改走 Contents API 提交（见 AGENTS §6.30）。
 
 ### 一次性准备
 

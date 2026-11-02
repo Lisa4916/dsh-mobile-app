@@ -34,7 +34,7 @@
 | 18 | 启动时侧栏不再闪：禁掉移动端 frame 侧栏首次就位的 transition | ✅ | 冷启动逐帧采样 `sideL >= -60` 帧数 1 → 0（两轮）；`tests=135`；lint 20 warning |
 | 19 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ | 真机 7 种层叠状态全通过（`tools/verify-back-layers.cjs`）；`tests=142`；lint 0/20 |
 | 20 | 第二台手机装机与收更新：版本号单一来源 + 局域网分发页 | ✅ | 手机侧 curl 下载 1,930,818 B，SHA-256 与清单一致；`adb install -r Success |
-| 21 | GitHub Release 发版：专用签名密钥 + tag 触发构建 | 🟡 代码就绪，待建仓库并配 4 个 secret | 本机已验证新证书签出的 release 包（`CN=DSH Remote`，SHA-256 `12912cf9…`） |
+| 21 | GitHub Release 发版：专用签名密钥 + tag 触发构建 | ✅ | Release `v0.2.0` 已发布；`releases/latest/download/dsh-remote-latest.apk` 实测 302→200、1,930,818 B，SHA-256 与 `SHA256SUMS.txt` 一致 |
 
 **测试基线：JVM 单测全量 `tests=142 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
@@ -1576,7 +1576,7 @@ node tools\publish-apk.cjs --bump patch
 
 三者都表现为「装不上」，但修法互不相同，排查时先分清是哪一类。
 
-## 第 21 步：GitHub Release 发版通道 🟡
+## 第 21 步：GitHub Release 发版通道 ✅
 
 用户：「有 GitHub 账号」—— 要把 §20 那套「电脑必须开着 + 同一 Wi-Fi」换成手机存一个固定网址。
 
@@ -1641,9 +1641,57 @@ node tools/publish-release.cjs --no-bump      # 打 tag 并推送
 **也不替你 commit** —— bump 后的 `version.properties` 要单独提交，脚本只打印该怎么做。
 本机试跑（无 origin）输出预期失败：`error: No such remote 'origin'` → `停：没有配置 origin 远端…`。
 
-### 21.5 现状
+### 21.5 落地结果（2026-11-02）
 
-代码全部就绪，本机已验证「用新 keystore 签出的 release 包证书正确」。
-剩下的两步只能在 GitHub 网页上做：建空仓库、配 4 个 Actions secret（名称与取值见 README）。
-做完之后 `node tools/publish-release.cjs --no-bump` 就能发版。
+仓库 **https://github.com/Lisa4916/dsh-mobile-app**（public），Release
+**https://github.com/Lisa4916/dsh-mobile-app/releases/tag/v0.2.0** 已发布三个资产：
+
+| 资产 | 大小 |
+|---|---|
+| `dsh-remote-0.2.0-2.apk` | 1,930,818 B |
+| `dsh-remote-latest.apk` | 1,930,818 B |
+| `SHA256SUMS.txt` | 185 B |
+
+手机端固定地址实测：`releases/latest/download/dsh-remote-latest.apk` →
+`302` 到 tag、再 `302` 到 `release-assets.githubusercontent.com`、最终 `200`；
+下载 1,930,818 B，SHA-256 `b10f01536c8a187be776d618c4bd9084421453e3e6f95bf5b4a6ce85cd2770f8`，
+与 `SHA256SUMS.txt` 一致。`aapt2 dump badging` 确认 `versionCode='2' versionName='0.2.0'`，
+`apksigner verify --print-certs` 确认 `V2 Signer: certificate DN: CN=DSH Remote…`。
+
+### 21.6 首次跑 CI 撞的三个坑（都已修，全部是真失败不是环境抖动）
+
+**坑 1：`setup-android` 默认装的 `tools` 包已被移除。**
+`android-actions/setup-android@v3` 默认 `packages: tools platform-tools`，而 cmdline-tools 16.0
+已经没有 `tools` 这个包：
+
+```
+[command]/usr/local/lib/android/sdk/cmdline-tools/16.0/bin/sdkmanager tools
+Warning: Failed to find package 'tools'
+Error: The process '.../sdkmanager' failed with exit code 1
+```
+
+表现是 **三个 job 全卡在 Set up Android SDK**（run 41455303784 / 41455142884）。
+修法：显式 `packages: 'platform-tools'`，platform / build-tools 交给 Gradle 构建期自己下。
+
+**坑 2：`apksigner` 不在 PATH 上。**
+上一条改完，Build release 成功了，但 Verify 步骤报 `apksigner: command not found`（exit 127）——
+`apksigner` 在 **build-tools** 里，不在 platform-tools。修法：从
+`$ANDROID_HOME/build-tools/*/apksigner` 取版本号最大的那个（`sort -V | tail -n1`），
+找不到就报错并列出目录。
+
+**坑 3：`github.com` 的 TLS 握手被拦，git 推送全挂。**
+本机 `github.com` 解析到 `198.18.0.13`（代理 fake-IP），`api.github.com` / `codeload` /
+`raw.githubusercontent.com` 都正常，唯独 `github.com:443` 无论直连、HTTP 代理、SOCKS5、
+换 `--resolve` 指定官方 IP，全部 `schannel: failed to receive handshake` /
+`OpenSSL: unexpected eof while reading`。`curl` 对 `github.com` 同样 `000`。
+
+所以本轮最后两次提交（`beed43d`、`c8191e8`）**是走 GitHub Contents API 推上去的**，
+不是 `git push`。做法：`PUT /repos/{owner}/{repo}/contents/{path}` 逐文件提交，
+然后 `POST /git/tags` + `PATCH /git/refs/tags/vX.Y.Z` 把 annotated tag 重指到新提交。
+一次性脚本用完即删，**没有留在仓库里**。
+
+> 这不是可以忽略的偶发故障：只要 `github.com:443` 的 TLS 起不来，
+> `git push` / `git ls-remote` 就一律不可用，而 `publish-release.cjs` 正是靠
+> `git push origin refs/tags/...` 发版的。下次发版前先探一句
+> `git ls-remote origin`，不通就走 API 或先修好代理规则（把 `github.com` 加进直连/正确节点）。
 

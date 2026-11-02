@@ -30,6 +30,7 @@
 | 14 | 安全与可见性修复：同域判定 / 状态栏前景 / 文案 / 渲染进程兜底 | ✅ | 全量 `tests=135`；真机四项逐条验证通过（第 14 步） |
 | 15 | 全网检索手机开发资料 + 知识库扩到 25 篇 | ✅ | base 内 16 → 25 篇；`passage` 全部 `ready`；`kb-verify` 全绿 |
 | 16 | 审计问题的 P0/P1 修复：release 通道打通、权限依赖清理、字号不再重建、删除加确认 | ✅ | release APK 1,976,330 B 签名有效且真机可用；`tests=135`；lint 29→20 |
+| 17 | 运行态全量功能回归（14 项主流程 + 3 项自愈/兜底） | ✅ | 全部符合设计；另修 2 处工具缺陷（硬编码序列号、依赖残留手势文件） |
 
 **测试基线：JVM 单测全量 `tests=135 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
@@ -1205,3 +1206,87 @@ release APK 1,976,330 B  签名有效、真机可用
 提交 `6672510`。**仍未处理**（留给下一步）：CI 从未在 GitHub 真跑过；
 `.git` 66 MB 里的历史截图未清；`MainActivity` 仍有约 1000 行；
 `SetTextI18n` 那 10 条要靠「把文案收敛进 strings.xml」这类独立改造。
+
+---
+
+## 第 17 步：运行态全量功能回归（16 项）✅ / 2 个工具缺陷已修
+
+设备 **motorola XT2335-3 `ZY22GHMK5F`**（Android 14 / SDK 34 / WebView 117.0.5938.60）。
+本轮只做「跑起来逐项验」，代码除工具脚本外未改。所有截图在 `build-artifacts/reg-*.png`。
+
+### 17.1 基线
+
+```
+gradle :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug --rerun-tasks
+BUILD SUCCESSFUL in 1m 42s
+tests=135 failures=0 errors=0   （10 个测试类）
+lint  0 error / 20 warning
+```
+
+### 17.2 正常项（14 项）
+
+| # | 功能 | 实测结果 |
+|---|---|---|
+| 1 | 冷启动 | `am start -W` → `TotalTime: 798ms`；约 8–14 s 出主界面 |
+| 2 | 自动连接 | 启动直接落在 `https://<tunnel>/`，`title=DeepSeek Harness`，hero + composer 都在 |
+| 3 | 点已保存连接 | 点第一行 → 进 WebView 主界面，`readyState=complete` |
+| 4 | 返回：会话 → 首页 | 0.75 s 内 `tabs=true→false`、`hero=false→true`，`goingHome` 只亮一次 |
+| 5 | 返回：首页 → 退出 | `topResumedActivity` 变 `com.motorola.launcher3/...`，进程存活 |
+| 6 | 快速连按返回 3 次 | 无崩溃、无 FATAL、pid 不变，正常退到桌面 |
+| 7 | 断网启动 | 真实飞行模式下 `main frame error -2: net::ERR_NAME_NOT_RESOLVED` → **回落列表页**，列表与文案完整 |
+| 8 | 手动连接：空地址 | Toast「地址要以 http:// 或 https:// 开头」，列表未变 |
+| 9 | 手动连接：非法地址（`back at`） | 同上；输入内容保留，不误建档案 |
+| 10 | 填入本机示例 | EditText 被填成 `http://192.168.50.58:3081/?token=…` |
+| 11 | 长按删除 | 弹「删除这条连接？/ 公网隧道 / <完整地址> / 删除后需要重新扫码或手输地址才能连回来。/ 取消 删除」；点取消正常关闭且列表不变 |
+| 12 | 扫码页 | 拒权限 → Toast「没有相机权限，可以手动输入地址」；允许 → `ScanActivity` 起 CameraX（日志 `SyncCaptureSessionImpl ... onConfigured`）；点取消回列表、pid 不变 |
+| 13 | 键盘避让 | 真实点击输入框 → `mInputShown=true`，页面 `#root` 高度 **772px → 502px**（键盘 270px），输入框被顶到键盘上方 |
+| 14 | 状态栏前景 | WebView 主界面顶部条带 `p50=21 p99=255 max=255`（浅色图标）；列表页 `min=102 p50=255`（深色图标）——两边都对 |
+
+自愈与兜底单列：
+
+| # | 功能 | 实测结果 |
+|---|---|---|
+| 15 | 自愈正向 | 弄脏 `dsh_pocket_token` → 三跳 `/` → `/?token=…&dsh-pocket-retry=1` → `/`，`title=DeepSeek Harness`，cookie 被重下发 `73a8dddd…` |
+| 16 | 自愈 ASK_USER 反向 | 端点去掉 `?token=` 后：Document 只有 1 跳、停在「DSH Pocket · 访问验证」、`dsh_pocket_token` **仍是脏值（未清）** —— 三项全 ✅ |
+| 17 | 渲染进程崩溃 | CDP `Page.crash` → logcat `render process gone (didCrash=true), rebuilding webview` 两次；**pid 31491 不变**，12 s 后页面自己回到主界面 |
+
+其他：`/data/tombstones` 与 `/data/anr` 均为 0；dropbox 无本包记录；内存 Java Heap 8,984 KB / Native 10,372 KB。
+
+### 17.3 异常项：两个工具缺陷（已修，非产品问题）
+
+这两条都不是 App 的 bug，但都会让人把「工具跑错」误判成「App 坏了」，所以按异常项记录。
+
+**A. 六个脚本把设备序列号写死成旧机器**
+复现：`node tools/record-back.cjs 9222` → `adb.exe: device '8PCE7LJB99VG7TRO' not found`。
+`cdp-forward.cjs`、`record-back.cjs`、`probe-back-nav.cjs`、`measure-smooth.cjs`、`verify-collapse.cjs` 全部受影响。
+修复：新增 `tools/device.cjs`，解析顺序「显式参数 > `DEV_SERIAL` > `adb devices` 里唯一一台」；
+零台或多台且没指定就报错退出，**不猜**。
+
+**B. `record-back.cjs` 依赖设备上预先存在的 `/data/local/tmp/swipe.txt`**
+那个文件是上一台机器留下的，新机器上没有 → `monkey` 报错，看着像「手势不生效」。
+修复：现场用 base64 生成手势脚本再喂给 `monkey`，不再依赖残留文件。
+
+**C. 顺带修掉一个验证陷阱**
+`verify-ask-user.cjs` 只对「端点不带 `?token=`」的场景有判定力。第一次跑时端点还带 token，
+自愈走了 `CLEAR_POCKET_COOKIE` 并成功恢复，三项全判❌ —— 那是**假阴性**。
+现改为直接读 `dsh_endpoints.xml` 判断，端点全带 token 就 `exit 2` 并说明原因。
+
+### 17.4 整体结论
+
+**功能层面没有发现新的产品缺陷**：14 项主流程 + 3 项自愈/兜底全部符合设计。
+第 14、16 步修的四项（同域判定、状态栏、文案、渲染进程兜底）在运行态复验中仍然成立。
+
+**仍需注意的一点**：`adb install -r` 默认对所有用户安装，本机有 `应用分身`（user 900/901），
+装完会变成 3 个同名图标且 `am start` 落到 `ResolverActivity`。
+本轮先 `pm uninstall --user 900/901` 才继续，之后 `pm list packages --user 900/901` 确认干净。
+装包一律建议 `adb shell pm install -r --user 0 <apk>`。
+
+**建议（按性价比排序）**：
+1. `tools/` 里剩下几个仍靠人工点坐标的脚本（如长按用 `UserWait` 拼 monkey 脚本），
+   可以像 `device.cjs` 一样收口成一个 `longpress.cjs`，避免每次手写 `DispatchPointer`。
+2. 键盘避让、扫码 CameraX、同域判定这三块仍然只能手跑（JVM 单测覆盖不到），
+   可以考虑用 Gradle Managed Devices 把它们做成 instrumented 用例 —— 但需要先接受一条
+   "每个用例起一台模拟器" 的时间成本。
+3. 飞行模式开关在 `cmd connectivity airplane-mode disable` 之后偶尔仍显示 `airplane_mode_on=1`，
+   本轮就撞到一次（以为网络没恢复，实际是开关没生效）。脚本化时应把
+   `ping` 结果作为判据，而不是命令退出码。

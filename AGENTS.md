@@ -502,6 +502,38 @@ adb shell pm install -r --user 0 <apk>     # 只装主用户
 判据：`am start` 之后 `topResumedActivity` 直接是 `com.dsh.remote/.MainActivity`，
 而不是 `ResolverActivity`。
 
+### 6.25 工具脚本不许写死设备序列号，也不许依赖设备上的残留文件
+
+第 17 步回归时，两处工具缺陷各骗了一次人，都是「工具跑错」被读成「App 坏了」：
+
+1. 六个脚本把序列号写死成 `8PCE7LJB99VG7TRO`（那台 Redmi 已下线），
+   换到 `ZY22GHMK5F` 后一律 `device 'xxx' not found`。
+2. `record-back.cjs` 读 `/data/local/tmp/swipe.txt`，那个文件是上一台机器留下的，
+   新机器上没有 → `monkey` 报错，看着像「手势不生效」。
+
+现在统一走 `tools/device.cjs`：
+
+```js
+const { ADB, resolveSerial } = require('./device.cjs');
+const DEV = resolveSerial(process.env.DEV_SERIAL);   // 参数 > DEV_SERIAL > 唯一一台
+```
+
+解析不到就报错退出，**不要写「猜第一台」** —— 多设备时猜错比报错代价大得多。
+手势类脚本现场用 base64 生成到 `/data/local/tmp/` 再喂给 `monkey`，不依赖任何预置文件。
+
+### 6.26 验证脚本必须先自查前提，否则会给出假阴性
+
+`tools/verify-ask-user.cjs` 验的是「地址里没有 token 时不许动 cookie」。
+第一次跑时端点还带着 `?token=`，于是自愈走了 `CLEAR_POCKET_COOKIE` 并成功恢复主界面，
+三项判据全判❌ —— **那恰恰说明自愈是对的**，结论完全反了。
+
+现在脚本开跑前直接 `run-as` 读 `shared_prefs/dsh_endpoints.xml`，
+端点全带 token 就 `exit 2` 并说明原因。判据不能看页面当前 URL：
+页面加载完已经是干净的 `origin/`，token 早被消费掉了。
+
+推广到所有验证脚本：**先断言「这次跑的前提成立」，再断言「结果对不对」**。
+前提不成立时给非零退出码，让人一眼看出是没匹配上而不是失败。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）

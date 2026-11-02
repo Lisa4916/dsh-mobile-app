@@ -147,13 +147,23 @@ jobs:
       - name: Verify APK is signed
         run: |
           set -euo pipefail
+          # apksigner 在 build-tools 里，不在 platform-tools。setup-android 只装了
+          # platform-tools（因为 tools 包已被移除），build-tools 由这次 release 构建刚下载，
+          # 所以这里从 SDK 目录现找最新的那一个，而不是假设它在 PATH 上。
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n1)"
+          if [ -z "$apksigner" ] || [ ! -x "$apksigner" ]; then
+            echo "::error::没找到 apksigner（$ANDROID_HOME/build-tools 下为空）"
+            ls -l "$ANDROID_HOME"/build-tools/ || true
+            exit 1
+          fi
+          echo "用 $apksigner"
           apk=app/build/outputs/apk/release/app-release.apk
           if [ ! -f "$apk" ]; then
             echo "::error::没产出 app-release.apk（只有 app-release-unsigned.apk 说明签名没生效）"
             ls -l app/build/outputs/apk/release/ || true
             exit 1
           fi
-          apksigner verify --print-certs "$apk" | tee certs.txt
+          "$apksigner" verify --print-certs "$apk" | tee certs.txt
           # 注意：apksigner 实际输出的前缀是 `V2 Signer: certificate DN:`，不是 `Signer #1 certificate DN`。
           # 写错的话这一步永远失败，而且看起来像「签名没生效」。
           grep -q 'certificate DN' certs.txt

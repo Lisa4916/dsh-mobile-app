@@ -5,15 +5,20 @@ name: CI
 # `gradle ... :app:testDebugUnitTest`。人工的必然结果是「想起来才跑」——
 # 事实上出现过文档里写 tests=12 而实际 59 的偏差。
 #
-# 这里刻意把 assembleDebug / testDebugUnitTest / lintDebug 都跑上：
-# - testDebugUnitTest 是唯一能防住「自愈逻辑被改坏」的闸门（Endpoint /
-#   RecoveryPlanner / HandshakeHealGate / BackNavigationDecider 四个纯 JVM 类）；
+# 这里刻意把 assembleDebug / assembleDebugAndroidTest / testDebugUnitTest / lintDebug 都跑上：
+# - testDebugUnitTest 是唯一能防住「自愈逻辑被改坏」的闸门（Endpoint / PageProbe /
+#   RecoveryExecutor / RecoveryPlanner / HandshakeHealGate / CookieNames / AutoConnect /
+#   BootstrapUrl / BackNavigationDecider 九个纯 JVM 类，共 118 条）；
+# - assembleDebugAndroidTest 把真机测试也**编译**一遍 —— 它不在这个 job 里运行，
+#   但改坏 PageProbe 的签名而没跟测试，必须在这里就报错，而不是等到有人插上手机；
 # - assembleDebug 防住资源/manifest/BuildConfig 注入这类只在打包期暴露的错误
 #   （踩过：`DEFAULT_LAN_URL` 引用了一个不存在的 BuildConfig 字段，
 #   单测全绿但打包失败）；
 # - lintDebug 的基线是 **0 error / 27 warning**（实测 `gradle :app:lintDebug`，
 #   耗时约 80s）。AGP 默认 `abortOnError=true` 但只对 error 生效，
 #   所以 warnings 不会挡合并，同时新增的真正 error 会立刻挡住。
+#
+# 第二个 job `instrumented` 跑真机测试（模拟器）：见文件末尾的说明。
 
 on:
   push:
@@ -54,7 +59,14 @@ jobs:
 
       - name: Assemble + unit tests
         # --rerun-tasks：不上缓存时也保证测试真的执行过，避免 UP-TO-DATE 假装绿
-        run: ./gradlew --no-daemon :app:assembleDebug :app:testDebugUnitTest --rerun-tasks
+        # assembleDebugAndroidTest 把真机测试也编译一遍：它不在这个 job 里运行，
+        # 但改坏 PageProbe 的签名而没跟测试，必须在这里就报错，而不是等到有人插上手机。
+        run: >-
+          ./gradlew --no-daemon
+          :app:assembleDebug
+          :app:assembleDebugAndroidTest
+          :app:testDebugUnitTest
+          --rerun-tasks
 
       - name: Lint
         run: ./gradlew --no-daemon :app:lintDebug
@@ -81,4 +93,68 @@ jobs:
         with:
           name: app-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 14
+
+  # 真机 instrumented 测试（用模拟器）。
+  #
+  # 为什么单独一个 job：需要 KVM（只在 Linux runner 上有），而且要启动模拟器、
+  # 装两个 APK、跑用例，比主 job 慢得多。混在一起会拖慢每次 push 的反馈。
+  #
+  # 为什么这几条非跑不可：`PageProbeJsTest` 验的是 `evaluateJavascript` 的**返回值形态**
+  # ——中文标题是不是原样返回、`innerText` 会不会把 `display:none` 的文案也算进去。
+  # 这些只有真 WebView 能回答，而判错的后果是**删掉用户的 cookie**。
+  # 写这条测试时就真机上撞到两件事：固定延时求值会拿到空结果并让测试进程崩溃；
+  # `loadDataWithBaseURL` 加载的文档上 `document.title` 读回空串（`<title>` 不生效）。
+  instrumented:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      # 模拟器需要 /dev/kvm 才能硬件加速；不加这条在 GitHub runner 上会退化成软件模拟，
+      # 启动要十几分钟，超时前跑不完。
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run instrumented tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          disable-animations: true
+          # 只跑这一个类。写成类过滤后，将来新增的 androidTest 不会悄悄拖慢这条闸门，
+          # 想让它进 CI 必须显式加进来。
+          script: >-
+            ./gradlew --no-daemon :app:connectedDebugAndroidTest
+            -Pandroid.testInstrumentationRunnerArguments.class=com.dsh.remote.PageProbeJsTest
+
+      - name: Upload instrumented report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: instrumented-report
+          path: app/build/reports/androidTests/connected/
           retention-days: 14

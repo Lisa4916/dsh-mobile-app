@@ -36,6 +36,12 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var store: EndpointStore
 
+    /**
+     * 连接档案的存取口子。界面只通过它读写，不直接抱 `SharedPreferences` ——
+     * 这样档案相关的编排（[AutoConnect]）能脱离 `Context` 被单测覆盖。
+     */
+    private lateinit var connections: ConnectionRepository
+
     private lateinit var root: FrameLayout
     private lateinit var listRoot: ScrollView
     private lateinit var savedRows: LinearLayout
@@ -47,8 +53,15 @@ class MainActivity : AppCompatActivity() {
 
     private var current: Endpoint? = null
 
-    /** 登录握手自愈的闸门，见 healHandshakeIfNeeded。 */
-    private val handshakeHeal = HandshakeHealGate()
+    /**
+     * 登录握手自愈的执行者。探测结果交给它判断与动手，Activity 只负责
+     * 「求值 JS」和「把副作用交给 WebView/CookieManager」这两件必须碰 Android 的事。
+     *
+     * 这样拆开之后，`healHandshakeIfNeeded` 里原本最难验证的顺序问题
+     * （健康必须复位闸门、ASK_USER 绝不能清 cookie、POCKET 与 UPSTREAM 不能混）
+     * 全部落到 [RecoveryExecutor] 上，用纯 JVM 单测钉住。
+     */
+    private lateinit var recovery: RecoveryExecutor
 
     /** 最近一次 IME insets 报告的键盘高度（px），供 WebBridge 查询。 */
     internal var currentKeyboardHeight: Int = 0
@@ -98,6 +111,8 @@ class MainActivity : AppCompatActivity() {
             WebView.setWebContentsDebuggingEnabled(true)
         }
         store = EndpointStore(this)
+        connections = SharedPrefsConnectionRepository(store)
+        recovery = RecoveryExecutor(env = uiRecoveryEnvironment())
         setContentView(buildUi())
         applyImeInsets()
         installBackHandling()
@@ -120,20 +135,14 @@ class MainActivity : AppCompatActivity() {
      * 变成一个连不上的地址，让用户以为是网络故障。
      */
     private fun autoconnect() {
-        val known = store.lastUsed()
-        if (known != null) {
-            connect(known, persist = false)
-            return
+        when (val plan = AutoConnect.decide(connections.lastUsed(), DEFAULT_LAN_URL, System.currentTimeMillis())) {
+            is AutoConnectPlan.Connect -> connect(plan.endpoint, persist = false)
+            is AutoConnectPlan.Seed -> {
+                applyList(connections.upsert(plan.endpoint))
+                connect(plan.endpoint, persist = false)
+            }
+            AutoConnectPlan.ShowList -> showList()
         }
-        val url = Endpoint.parseUri(DEFAULT_LAN_URL)
-        if (url == null) {
-            showList()
-            return
-        }
-        val label = labelFromUrl(url)
-        val ep = Endpoint(EndpointStore.idFor(label, url), label, url, System.currentTimeMillis())
-        applyList(store.upsert(ep))
-        connect(ep, persist = false)
     }
 
     /**
@@ -442,7 +451,7 @@ class MainActivity : AppCompatActivity() {
     /** 重建「已保存的连接」区。只动 savedRows，不碰输入框，避免焦点与已输入文本丢失。 */
     private fun refreshSavedList() {
         savedRows.removeAllViews()
-        val entries = store.all().sortedByDescending { it.lastUsedAt }
+        val entries = connections.all().sortedByDescending { it.lastUsedAt }
 
         if (entries.isEmpty()) {
             savedRows.addView(emptyHint)
@@ -492,7 +501,7 @@ class MainActivity : AppCompatActivity() {
                 textSize = 11f
                 setTextColor(INK_DIM)
                 setOnLongClickListener {
-                    val updated = store.remove(e.id)
+                    val updated = connections.remove(e.id)
                     applyList(updated)
                     toast("已删除 ${e.label}")
                     true
@@ -532,14 +541,14 @@ class MainActivity : AppCompatActivity() {
         val label = labelFromUrl(url)
         val id = EndpointStore.idFor(label, url)
         val ep = Endpoint(id, label, url, System.currentTimeMillis())
-        applyList(store.upsert(ep))
+        applyList(connections.upsert(ep))
         connect(ep, persist = false)
     }
 
     private fun connect(endpoint: Endpoint, persist: Boolean) {
         current = endpoint
-        handshakeHeal.reset()
-        if (persist) applyList(store.touch(endpoint.id))
+        recovery.reset()
+        if (persist) applyList(connections.touch(endpoint.id))
 
         listRoot.visibility = View.GONE
         webView.visibility = View.VISIBLE
@@ -577,15 +586,39 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------- WebView 回调
 
+    /**
+     * 把自愈要碰的 Android 侧能力包成一个 [RecoveryEnvironment]。
+     *
+     * 这里的每个方法都只做「翻译」：把执行者的意图落到 CookieManager / WebView / Toast 上。
+     * **不放任何判断** —— 判断全在 [RecoveryExecutor]，放这里就又变成测不到的代码了。
+     */
+    private fun uiRecoveryEnvironment(): RecoveryEnvironment = object : RecoveryEnvironment {
+        override fun clearUpstreamCookies(url: String) = clearCookies(url, pocket = false)
+
+        override fun clearPocketCookie(url: String) = clearCookies(url, pocket = true)
+
+        override fun navigate(url: String) {
+            runOnUiThread { webView.loadUrl(url) }
+        }
+
+        override fun notifyUser(message: String) {
+            runOnUiThread { toast(message) }
+        }
+
+        override fun log(message: String) {
+            android.util.Log.i("DshRemote", message)
+        }
+    }
+
     internal fun onPageFinished(url: String?) {
         progress.visibility = View.GONE
-        healHandshakeIfNeeded(url)
+        healHandshakeIfNeeded()
         // 复查一次：探测可能被「刚动过手」的静默期挡掉（页面还在过渡稿），
         // 这时代码就再也收不到「已恢复」的信号，闸门会一直以为还在同一轮故障里。
         // 延迟到静默期之后再探一次，保证健康状态一定能被记录。
-        if (handshakeHeal.needsHealthyConfirmation()) {
+        if (recovery.needsHealthyConfirmation()) {
             webView.postDelayed({
-                if (!isFinishing && !isDestroyed) healHandshakeIfNeeded(url)
+                if (!isFinishing && !isDestroyed) healHandshakeIfNeeded()
             }, HandshakeHealGate.PROBE_QUIET_AFTER_ACT_MS + 200L)
         }
     }
@@ -595,118 +628,71 @@ class MainActivity : AppCompatActivity() {
      * 往往比标题回调晚一拍；标题里已经带了「无法完成登录握手」，早点修能少一次白屏。
      */
     internal fun onReceivedTitle(title: String?) {
-        if (title != null && title.contains("无法完成登录握手")) healHandshakeIfNeeded(null)
+        if (title != null && title.contains("无法完成登录握手")) healHandshakeIfNeeded()
     }
 
     /**
-     * dsh-pocket 登录握手自愈。
+     * dsh-pocket 登录握手 / 访问验证页的自愈入口。
      *
-     * 现象：DSH 重启后 `dsh web` 端口会变（实测 54282 → 17169）。dsh-pocket 会把**新**的
-     * launch token 补进请求，上游回 303 下发 `dsh-auth-*` cookie，于是本该无缝。
-     * 但 WebView 里若已经存着**旧端口**签发的 `dsh-auth-*` cookie（authority 字段写的
-     * 是旧端口），代理判定「已有 cookie、不需要补 token」，直接把请求转上去 → 上游不认
-     * 这个 cookie → 401 → 页面只剩一行 "dsh web authentication required"。
-     * 连续失败 3 次后代理进入 60 秒限流，回 503「无法完成登录握手」。
+     * 现象（两类故障，用户感知是同一件事：「进不去」）：
      *
-     * 判据（三选一即触发）：
-     *  1. 页面标题是握手失败页的标题；
-     *  2. 正文出现 dsh web 的裸 401 文案；
-     *  3. 标题含 DSH Pocket 且正文含「握手」（过渡页/失败页的兜底形态）。
+     * **一、上游 401。** DSH 重启后 `dsh web` 端口会变（实测 54282 → 17169）。dsh-pocket
+     * 会把**新**的 launch token 补进请求，上游回 303 下发 `dsh-auth-*` cookie，本该无缝。
+     * 但 WebView 里若已经存着**旧端口**签发的 `dsh-auth-*`（authority 字段写的是旧端口），
+     * 代理判定「已有 cookie、不需要补 token」，直接转上去 → 上游不认 → 401 →
+     * 页面只剩 "dsh web authentication required"。连续失败 3 次后代理进入 60 秒限流，
+     * 回 503「无法完成登录握手」。
      *
-     * 做法：**只清 dsh-auth-\* 会话 cookie**，再带 `dsh-pocket-retry=1` 重新导航（该参数会清掉
-     * 代理侧的失败计数，见 dsh-pocket/lib/proxy.mjs:928）。
+     * **二、访问验证页。** 残留一枚失效的 `dsh_pocket_token` 时，dsh-pocket 的
+     * `maybeSeedAuthCookie` 拒绝下发新 cookie，于是地址里带着 `?token=` 也停在验证页。
      *
-     * 为什么不能 removeAllCookies()：WebView 里除了 dsh-auth-* 还有 dsh_pocket_token ——
-     * 那是用户输入 PIN 换来的局域网会话。全部清掉等于把用户踢回「访问验证」页，
-     * 而那个页面里没有 PIN 可填（用户早忘了），表现就是「自愈之后彻底进不去了」。
-     * 这个坑在真机上实测复现过：清完 cookie 页面变成「DSH Pocket · 访问验证」。
+     * 这两类故障该清**不同的** cookie，判断与动手都在 [RecoveryExecutor] 里
+     * （用纯 JVM 单测钉住了「URL 没有 token 时绝不清 pocket cookie」这条铁律）。
+     * 这里只做三件必须有 Android 才能做的事：求值取标题/取正文、把两个字符串
+     * 翻译成页面状态、交给执行者。
+     *
+     * 判据本身（[PageProbe.classify]）是纯函数，不在 JS 里 —— 它在 JVM 单测里被
+     * 逐条钉住，不必上真机试错。求值只负责把 `document.title` 与
+     * `document.body.innerText` 取回来（[PageProbeJsTest] 在真 WebView 里验证这一段）。
+     *
+     * 取值分两次求值（标题、正文各一次）而不是拼成一段 JS：这样任一求值失败都只影响
+     * 自己那一半，`classify` 收到 null 会走「拿不准一律不动手」的兜底，而不是整段抛异常。
      */
-    private fun healHandshakeIfNeeded(url: String?) {
-        if (!handshakeHeal.mayProbe()) return
+    private fun healHandshakeIfNeeded() {
         val target = current ?: return
-        webView.evaluateJavascript(HEAL_PROBE_JS) { raw ->
-            val action = RecoveryPlanner.plan(PageState.fromProbe(raw), target.url)
-            if (action == RecoveryAction.NONE) {
-                // 页面正常：解除「本次已动手」的锁定，将来再坏还能自动修。
-                // 这一步很关键 —— 没有它，第一次自愈成功后 done 永远为真，
-                // DSH 下次重启改端口还得手动重启 App。
-                handshakeHeal.onHealthy()
+        if (!recovery.shouldProbe(target.url)) return
+
+        webView.evaluateJavascript(PageProbe.JS_TITLE) { rawTitle ->
+            val title = PageProbe.decodeJsString(rawTitle)
+            // 标题就足以定案时不必再取正文（多数健康页面走这条快路）
+            val quick = PageProbe.classify(title, "")
+            if (quick == "2") {
+                // 『DSH Pocket · 访问验证』标题命中：正文不会再改变结论
+                recovery.handleProbeResult(quick, target.url)
                 return@evaluateJavascript
             }
-            // 故障态确认了，但本次已经动手过就停在这里：重载后的失败页会再次走到这段，
-            // 若继续动手就是无限刷新。
-            if (!handshakeHeal.mayAct()) {
-                android.util.Log.i("DshRemote", "page broken($action) but already healed once, waiting for user")
-                return@evaluateJavascript
-            }
-            if (action == RecoveryAction.ASK_USER) {
-                // 地址里没有 token：清掉 dsh_pocket_token 会把用户永久锁在验证页外，
-                // 那个页面没有密码可填。只提示，不动 cookie。
-                handshakeHeal.onActed()
-                android.util.Log.i("DshRemote", "pin page but url has no token, asking user")
-                runOnUiThread { toast("地址里没有 token，请重新扫码或粘贴完整地址") }
-                return@evaluateJavascript
-            }
-            handshakeHeal.onActed()
-            when (action) {
-                RecoveryAction.CLEAR_POCKET_COOKIE -> {
-                    // 残留的失效 dsh_pocket_token 会让 dsh-pocket 拒绝下发新 cookie
-                    // （proxy.mjs:509-525 `maybeSeedAuthCookie` 第一行就 return），
-                    // 于是带着 ?token= 也停在「访问验证」页。清掉它再重新导航即可。
-                    android.util.Log.i("DshRemote", "pin page with token in url, clearing dsh_pocket_token and retrying")
-                    clearPocketCookie(target)
-                }
-                else -> {
-                    android.util.Log.i("DshRemote", "handshake broken, clearing ONLY dsh-auth-* and retrying")
-                    clearAuthCookies(target)
-                }
-            }
-            val retry = RecoveryPlanner.withRetry(target.url) ?: return@evaluateJavascript
-            runOnUiThread {
-                webView.loadUrl(retry)
-                toast("已重新建立与电脑的连接")
+            webView.evaluateJavascript(PageProbe.JS_BODY) { rawBody ->
+                val body = PageProbe.decodeJsString(rawBody)
+                recovery.handleProbeResult(PageProbe.classify(title, body), target.url)
             }
         }
     }
 
     /**
-     * 只删除 `dsh_pocket_token`（dsh-pocket 的局域网 PIN 会话），保留 `dsh-auth-*`。
-     *
-     * **只有 URL 的 query 里确实还带着 `?token=` 时才允许调用**（判据在
-     * [RecoveryPlanner.plan]，单测钉住了）。带着 token 重新导航，代理会立刻用
-     * `maybeSeedAuthCookie` 下发一枚新的、与当前 sessionKey 匹配的 cookie。
-     * 没有 token 就删，用户会被锁在「访问验证」页外 —— 那里没有密码可填。
-     */
-    private fun clearPocketCookie(target: Endpoint) {
-        val cm = CookieManager.getInstance()
-        val origin = target.url
-        val all = cm.getCookie(origin) ?: return
-        all.split(';').forEach { pair ->
-            val name = pair.substringBefore('=').trim()
-            if (name == POCKET_COOKIE) {
-                cm.setCookie(origin, "$name=; Max-Age=0; Path=/")
-            }
-        }
-        cm.flush()
-    }
-
-    /**
-     * 只删除 `dsh-auth-*`（上游会话），保留 `dsh_pocket_token`（局域网 PIN 会话）。
+     * 删除某一类 cookie。**判断不在方法里**，`pocket` 由 [RecoveryExecutor] 决定，
+     * 这里只负责「取出名字 → 逐个写过期值 → flush」。
      *
      * Android 的 CookieManager 没有「按名字前缀删」的 API，只能把现有 cookie 取出来、
      * 对要删的逐个 setCookie 成过期值。删完要 flush()，否则下个请求可能还带旧值。
+     *
+     * 为什么只删一类（历史上踩过）：WebView 里除了 `dsh-auth-*` 还有 `dsh_pocket_token` ——
+     * 那是用户输 PIN 换来的局域网会话。全清等于把人踢回「访问验证」页，
+     * 而那个页面里没有 PIN 可填（用户早忘了），表现就是「自愈之后彻底进不去了」。
      */
-    private fun clearAuthCookies(target: Endpoint) {
+    private fun clearCookies(url: String, pocket: Boolean) {
         val cm = CookieManager.getInstance()
-        val origin = target.url
-        val all = cm.getCookie(origin) ?: return
-        all.split(';').forEach { pair ->
-            val name = pair.substringBefore('=').trim()
-            if (name.startsWith(AUTH_COOKIE_PREFIX)) {
-                // 置空 + 过期时间放过去 → 浏览器删除该 cookie
-                cm.setCookie(origin, "$name=; Max-Age=0; Path=/")
-            }
-        }
+        val targets = CookieNames.selectForRemoval(cm.getCookie(url), pocket)
+        targets.forEach { name -> cm.setCookie(url, CookieNames.expiryDirective(name)) }
         cm.flush()
     }
 
@@ -838,10 +824,11 @@ class MainActivity : AppCompatActivity() {
         const val KEYBOARD_SNAP_THRESHOLD = 90
 
         /**
-         * 上游会话 cookie 的名字前缀（dsh web 用 `dsh-auth-<随机串>`）。
-         * 自愈只删这一类，保留 `dsh_pocket_token` 这个局域网 PIN 会话 —— 详见 clearAuthCookies。
+         * 上游会话 cookie 的前缀与局域网 PIN 会话的名字都在 [CookieNames] 里 ——
+         * 那两类 cookie 一旦搞混就会把用户锁在验证页外，所以连同「怎么筛」
+         * 一起做成了纯 JVM 对象，有单测兜着。这里只留指向。
          */
-        const val AUTH_COOKIE_PREFIX = "dsh-auth-"
+        val AUTH_COOKIE_PREFIX = CookieNames.AUTH_PREFIX
 
         /**
          * dsh-pocket 的局域网会话 cookie（`HttpOnly`，值 = `sha256(PIN:sessionKey)`）。
@@ -852,7 +839,7 @@ class MainActivity : AppCompatActivity() {
          * 请求里**有任何** `dsh_pocket_token` 就 `return`，拒绝下发新的 —— 于是带着
          * `?token=` 也停在「访问验证」页。见 [RecoveryPlanner] 顶部的实测对照。
          */
-        const val POCKET_COOKIE = "dsh_pocket_token"
+        val POCKET_COOKIE = CookieNames.POCKET
 
         /**
          * 用来把 WebView 从 Chromium 内部错误页里推出来。
@@ -863,49 +850,6 @@ class MainActivity : AppCompatActivity() {
          * 被 MIUI 拒绝注入造成的假阴性，详见 [onPageError] 的说明。
          */
         const val BLANK_PAGE = "about:blank"
-
-        /**
-         * 探测页面处于什么状态。返回值经 [PageState.fromProbe] 翻译：
-         *  `'0'` 正常 / 握手过渡（不动手）、`'1'` 上游 401 握手损坏（清 dsh-auth-*）、
-         *  `'2'` dsh-pocket「访问验证」页（URL 带 token 时清 dsh_pocket_token）。
-         *
-         * 判据以**正文**为主，标题只做辅助 —— 这是实测逼出来的结论：
-         * DSH 前端是 SPA，`document.title` 在页面切换后可能滞后或残留。真机调试时遇到过
-         * 「标题还是上一次的失败页标题、正文早已是正常主界面」，若信标题就会无故清掉
-         * 用户 cookie，把人踢回登录页。
-         *
-         * 各形态的真实正文（均取自 dsh-pocket 2.12 / dsh web 0.2.1-rc.5 实测）：
-         *  - 失败页：标题「DSH Pocket · 无法完成登录握手」，正文含「无法完成登录握手」
-         *  - 上游 401：「dsh web authentication required」
-         *  - 正常主界面：含「导出会话日志」/「探索未至之境」
-         *  - PIN 登录页：正文「此局域网地址受访问密码保护」/「访问密码 | Access PIN」，
-         *    标题「DSH Pocket · 访问验证」—— 残留坏 cookie 的典型症状，返回 '2'
-         *  - 过渡页：标题「DSH Pocket · 正在进入」—— 握手进行中，不能当故障
-         */
-        const val HEAL_PROBE_JS = """
-            (function(){
-              try {
-                var t = (document.title || '');
-                var b = (document.body ? document.body.innerText : '') || '';
-                // 正常主界面：只要认出 DSH 主界面特征就不动手，标题再可疑也不算故障
-                if (b.indexOf('导出会话日志') !== -1) return '0';
-                if (b.indexOf('探索未至之境') !== -1) return '0';
-                // 握手过渡页：正在进行，等它自己跳
-                if (t.indexOf('正在进入') !== -1) return '0';
-                // 真失败：以正文为准
-                if (b.indexOf('无法完成登录握手') !== -1) return '1';
-                if (b.indexOf('dsh web authentication required') !== -1) return '1';
-                // PIN 页：正文或标题任一命中即可判（这一页正文很短，渲染很快；
-                // 而标题「DSH Pocket · 访问验证」是它最稳定的特征）
-                if (b.indexOf('受访问密码保护') !== -1) return '2';
-                if (b.indexOf('访问密码') !== -1) return '2';
-                if (t.indexOf('访问验证') !== -1) return '2';
-                // 正文还没渲染出来时，才退回用标题判断失败页
-                if (b.length === 0 && t.indexOf('无法完成登录握手') !== -1) return '1';
-                return '0';
-              } catch (e) { return '0'; }
-            })()
-        """
     }
 }
 

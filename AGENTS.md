@@ -39,7 +39,7 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
-# 构建 + 单测（两条一起跑，基线 tests=69 failures=0）
+# 构建 + 单测（两条一起跑，基线 tests=118 failures=0）
 & 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
     -p 'D:\dsh-mobile-app' :app:assembleDebug :app:testDebugUnitTest --console=plain -q
 
@@ -145,6 +145,22 @@ app/src/main/java/com/dsh/remote/
 │                        背景色 0xFF151517、installHomeResetOnStart()、注入 KEYBOARD_HOOK_JS
 │                        HOME_RESET_JS / KEYBOARD_HOOK_JS 两个常量
 ├── WebBridge.kt         @JavascriptInterface，注入名 "dshNative"
+├── CookieNames.kt       「删哪类 cookie」的唯一判据（纯 JVM）
+│                        AUTH_PREFIX / POCKET / selectForRemoval(all, pocket) / expiryDirective
+│                        ⚠ 以前这段逻辑在 Activity 里写了两遍（clearAuthCookies 与
+│                          clearPocketCookie），删错一类就把用户踢回验证页且没密码可填
+├── RecoveryExecutor.kt  自愈编排（纯 JVM）：探针结果 → RecoveryAction → 动作
+│                        经 RecoveryEnvironment 接口调 clear*/navigate/notifyUser/log，
+│                        所以「清什么、清不清、要不要重连」全是可断言返回值
+│                        RecoveryOutcome { HEALTHY, SKIPPED, ALREADY_HEALED,
+│                                          ASKED_USER, CLEARED_UPSTREAM, CLEARED_POCKET }
+├── ConnectionRepository.kt 档案读写接口 + SharedPrefsConnectionRepository
+│                        AutoConnect.decide(lastUsed, defaultUrl, now) → Connect/Seed/ShowList
+├── PageProbe.kt         页面状态判据（纯 JVM）
+│                        JS_TITLE / JS_BODY（只有这两句需要真 WebView）
+│                        classify(title, body) → "0"/"1"/"2"
+│                        decodeJsString(raw) → 还原 evaluateJavascript 的返回值
+│                        ⚠ 判据不许再写回 JS —— 那会重新变成真机试错
 ├── RecoveryPlanner.kt   页面坏了该怎么修的决策中心（**纯 JVM，不碰 android.net.Uri**）
 │                        PageState { HEALTHY, HANDSHAKE_BROKEN, PIN_REQUIRED, UNKNOWN }
 │                        RecoveryAction { NONE, CLEAR_UPSTREAM_COOKIE,
@@ -162,9 +178,30 @@ app/src/main/java/com/dsh/remote/
 │                          4 列老数据的升级兼容
 ├── BootstrapUrlTest.kt  10 条单测：拼接、scheme/尾斜杠容错、空值返回 null、
 │                          旧 ?token= 不叠加、PIN 特殊字符编码
+├── CookieNamesTest.kt   10 条单测：删哪类 cookie（前缀精确匹配 / 值里出现名字不算 /
+│                          junk 段容错 / 过期指令只作用一个名字）
+├── AutoConnectTest.kt    7 条单测：lastUsed 优先、无内置地址宁可停在列表也不 loadUrl 空串、
+│                          seed 的 kind 由 URL 推断、不改写已拼好的地址
+├── PageProbeTest.kt     20 条单测：六种页面形态 + 优先级（主界面 > 故障 > PIN）、
+│                          长正文、null 兜底、evaluateJavascript 返回值还原（\\uXXXX / null / 转义）
+├── RecoveryExecutorTest.kt 12 条单测：FakeEnv 记录副作用，钉住「没有 token 时绝不清 pocket
+│                          cookie」「ASK_USER 不重放 Toast」「退避与单轮额度」
 └── RecoveryPlannerTest.kt 14 条单测：fromProbe 映射、plan 分支穷举、hasPinToken
                            只认 query 里的 token、withRetry 幂等与 fragment 位置
 ```
+
+`androidTest/PageProbeJsTest.kt`：7 条**真机**用例，验 `PageProbe.JS_TITLE` / `JS_BODY`
+在真 WebView 里能不能把中文标题与正文原样取回（转义、`display:none` 跳过、`about:blank`）。
+跑法：
+
+```
+adb install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk   # -t 不能省
+adb shell am instrument -w -r -e class com.dsh.remote.PageProbeJsTest \\
+    com.dsh.remote.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+> 判据为什么拆两半：**取值**只有真 WebView 能验（`PageProbeJsTest`），
+> **判状态**是纯函数（`PageProbeTest` 20 条）。判错要删用户 cookie，不能靠真机试错。
 
 `res/values/`：`page_dark = #151517`（**必须与 DSH 页面 body 同色**，见 §6.2）、`surface`、`ink`、`ink_dim`、`brand`。
 `AndroidManifest.xml`：`INTERNET`、`usesCleartextTraffic="true"`（目标是局域网 http 明文）、`network_security_config`。

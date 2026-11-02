@@ -23,10 +23,14 @@
 | 7e | 公网隧道开启 + 真机 4G 验证 | ✅ | 4G 下 `title=DeepSeek Harness`；公网下自愈跳同样成立 |
 | 8 | 手机软件开发知识库（5 篇种子文档入库 + 挂载） | ✅ | entries/documents/fts = 5/5/5 |
 | 9 | 工程加固：截图出库 / PIN 去硬编码 / CI / 集成契约 / 文档纠错 | ✅ | 全量 `tests=69 failures=0`；`git ls-files` 无调试截图 |
+| 10 | 拆 `MainActivity`：抽 `RecoveryExecutor` / `CookieNames` / `ConnectionRepository` | ✅ | 全量 `tests=118 failures=0`；真机自愈 3 跳仍成立 |
+| 11 | 补 `androidTest`：`PageProbe` 判据拆成纯函数 + 真 WebView 取值验证 | ✅ | 真机 `OK (7 tests)`；`tests=118` |
 
-**测试基线：全量 `tests=69 failures=0 errors=0 skipped=0`**
-（`BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `EndpointTest` 24 + `HandshakeHealGateTest` 10 + `RecoveryPlannerTest` 14）
-**APK：`app-debug.apk` 7,469,572 B（全量 `--rerun-tasks`；增量构建约 7,516,844 B，差异属 dex/资源打包顺序，不是回归）**（versionName 0.1.0，versionCode 1）
+**测试基线：JVM 单测全量 `tests=118 failures=0 errors=0 skipped=0`**
+（`AutoConnectTest` 7 + `BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
+`EndpointTest` 24 + `HandshakeHealGateTest` 10 + `PageProbeTest` 20 + `RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
+**真机 instrumented：`PageProbeJsTest` 7 条 `OK (7 tests)`**（`8PCE7LJB99VG7TRO`，Android 15）
+**APK：`app-debug.apk` 7,485,956 B**（versionName 0.1.0，versionCode 1）
 
 ---
 
@@ -587,6 +591,100 @@ App 依赖 dsh-pocket 一堆**内部细节**（cookie 名 `dsh_pocket_token` / `
 
 ---
 
+## 第 10 步：拆 `MainActivity` ✅
+
+从 911 行降到 864 行（`healHandshakeIfNeeded()` 从 47 行缩到 4 行，两个 cookie 清理方法合并成一个）。
+抽出的四个单元各自有纯 JVM 测试：
+
+| 新文件 | 行 | 职责 | 测试 |
+|---|---|---|---|
+| `CookieNames.kt` | 39 | `dsh-auth-*` / `dsh_pocket_token` 的**删哪类**判据 + 过期指令 | `CookieNamesTest` 10 |
+| `RecoveryExecutor.kt` | 157 | 自愈编排：探针结果 → `RecoveryAction` → 动作（通过 `RecoveryEnvironment` 接口） | `RecoveryExecutorTest` 12 |
+| `ConnectionRepository.kt` | 69 | 档案读写接口 + `SharedPrefsConnectionRepository` + `AutoConnect.decide` | `AutoConnectTest` 7 |
+| `PageProbe.kt` | 173 | 页面状态判据（纯函数）+ `evaluateJavascript` 返回值还原 | `PageProbeTest` 20 |
+
+### 为什么这么切
+
+`MainActivity` 现在只留**必须有 Android 才能做**的事：造 UI、WebView 生命周期、
+`CookieManager` 调用、`Toast`、`evaluateJavascript` 求值。凡是有「判断」的部分都搬出去了：
+
+- `RecoveryEnvironment` 接口把 `navigate` / `notifyUser` / `clear*Cookie` / `log` 抽成注入点，
+  于是「清哪个 cookie、清不清、要不要重连」全是可断言的返回值，
+  `RecoveryExecutorTest` 里的 `FakeEnv` 直接记录副作用次数。
+- `AutoConnect.decide` 返回 `Connect` / `Seed` / `ShowList` 三态，
+  「没有内置地址时宁可停在列表也不 loadUrl 空串」这条有测试钉住。
+- `CookieNames.selectForRemoval` 是「删哪类 cookie」的唯一判据 —— 以前这段逻辑
+  在 Activity 里写了两遍（`clearAuthCookies` 与 `clearPocketCookie`），删错一类就会
+  把用户踢回验证页且没有密码可填。
+
+### 编译期踩到的一个真错误
+
+```
+e: MainActivity.kt:608:22 Return type of 'log' is not a subtype of the return type of
+   the overridden member 'fun log(message: String): Unit'
+```
+
+`override fun log(message: String) = android.util.Log.i(...)` —— `Log.i` 返回 `Int`，
+表达式体把返回类型推断成 `Int`。改成块体即可。
+**教训**：给 Android API 写单行 `override fun ... =` 包装时，要看被调函数的返回类型。
+
+## 第 11 步：补 `androidTest` ✅
+
+### 判据拆成两半，是这一步的核心决定
+
+原来整段判定逻辑是一个 JS 字符串（`HEAL_PROBE_JS` 里 `if (b.indexOf('xx')) return '1'`）。
+问题不是「不能测」而是**测错了代价极高却只能靠真机试错**：判错就删用户 cookie。
+
+现在拆成：
+
+| 半边 | 位置 | 谁来验 |
+|---|---|---|
+| **取值**：`document.title` / `document.body.innerText` 能不能原样取回 Kotlin | `PageProbe.JS_TITLE` / `JS_BODY` + `decodeJsString` | `androidTest/PageProbeJsTest`（真 WebView） |
+| **判状态**：拿到 (标题, 正文) 后是 `"0"` / `"1"` / `"2"` | `PageProbe.classify`（纯函数） | `test/PageProbeTest`（20 条 JVM） |
+
+`MainActivity.healHandshakeIfNeeded()` 变成：先求值取标题 → 用 `classify(title, "")` 快判
+（标题命中 PIN 页就直接定案，省一次求值）→ 否则再取正文 → `classify(title, body)`。
+
+### 真机上测出来的两个实际问题（都改了测试，不是改产品代码）
+
+1. **`<no result>` 与进程崩溃**：第一版用固定 300ms 延时再求值，真机上还没加载完就求值了，
+   回调不来、`CountDownLatch` 超时；反复创建/销毁 `WebView` 还让测试进程崩了。
+   改为在 `WebViewClient.onPageFinished` 里求值。
+2. **`loadDataWithBaseURL` 加载的文档上 `document.title` 读回空串**（`<title>` 标签不生效）。
+   改为用 `evaluateJavascript("document.title = ...")` 设置标题 —— 这恰好也是 DSH 前端
+   （SPA）真实产生标题的方式，比塞 `<title>` 更贴近实际。
+   **这一条是 instrumented 测试独有的发现**：纯 JVM 侧永远撞不到。
+
+### 真机结果
+
+```
+$ adb shell am instrument -w -r -e class com.dsh.remote.PageProbeJsTest \
+    com.dsh.remote.test/androidx.test.runner.AndroidJUnitRunner
+OK (7 tests)
+```
+
+7 条覆盖：中文标题含 `·` 的往返、正文中文往返、空标题还原成空串、
+`innerText` 跳过 `display:none`（判据靠这一点区分「页面里藏着的旧告警」与真故障页）、
+长正文不丢末尾特征、六种真实页面形态端到端、`about:blank` 不崩。
+
+### 装测试 APK 的坑
+
+`adb install app-debug-androidTest.apk` 报
+`INSTALL_FAILED_USER_RESTRICTED: Install canceled by user` —— 需要加 `-t`（允许测试包）：
+`adb install -r -t app-debug-androidTest.apk`。
+
+### 拆分后的真机回归
+
+- 启动直接进主界面（截图 `build-artifacts/shots/regress-step6-7.png`，`title=DeepSeek Harness`）。
+- 自愈仍成立（`tools/verify-selfheal-net.cjs 9231`）：
+  ```
+  1. https://<公网域名>/
+  2. https://<公网域名>/?token=<PIN>&dsh-pocket-retry=1   ← 自愈重连(retry)   ← 带 token
+  3. https://<公网域名>/
+  title = DeepSeek Harness ; 自愈重连请求出现 = 是 ✅ ; cookie 被重新下发 = 是 ✅
+  ```
+
+---
 ## 下一步
 
 1. ~~真机验证第 7b 步自愈~~ ✅ 已完成（第 7d 步，CDP 抓到 `retry+token` 重连）。
@@ -602,11 +700,14 @@ App 依赖 dsh-pocket 一堆**内部细节**（cookie 名 `dsh_pocket_token` / `
    后续验证以这台为准；Redmi 那台的记录只在 `kb/` 与 `CONTEXT-ANCHOR.md` 的历史环境标注里保留。
    > 补充：**公网 4G 验收是在 Redmi `8PCE7LJB99VG7TRO` 上通过的**，XT2335-3 在 4G 下页面黑屏过一次并掉了 adb。
    > 两台都能用，但写结论时要说清是哪台。
-7. **补 `androidTest`**（审计第 6 项）：现在只有 JVM 单测，WebView 同域判定、cookie 清除→重导航、
-   键盘 insets、扫码链路全无自动化，靠 `tools/*.cjs` 手跑。第一步建议用 MockWebServer 覆盖自愈链路。
-8. **拆 `MainActivity`**（审计第 7 项）：911 行 God Activity。纯逻辑已抽出五个类并有 69 条测试，
-   但 `healHandshakeIfNeeded()` 仍直读 `current`、直调 `webView.loadUrl`、直 toast，不可单测。
-   建议抽 `RecoveryExecutor`（动作执行）与 `ConnectionRepository`（档案读写）。
+7. ~~补 `androidTest`~~ ✅ 已完成（第 11 步）：`PageProbe` 判据拆成纯函数，
+   `PageProbeTest` 20 条 JVM + `PageProbeJsTest` 7 条真机。
+   **仍缺**：WebView 同域判定（`shouldOverrideUrlLoading`）、cookie 清除→重导航的端到端、
+   键盘 insets、扫码 CameraX+ZXing —— 这四块还是靠 `tools/*.cjs` 手跑。
+8. ~~拆 `MainActivity`~~ ✅ 已完成（第 10 步）：抽出 `RecoveryExecutor` / `CookieNames` /
+   `ConnectionRepository` / `PageProbe`，四个类共 49 条测试。
+   **仍有 864 行**：`buildUi()` 约 128 行代码造 UI（无 layout XML），可考虑拆成
+   `HomeView` / `WebPanel` 两个自定义 View，但收益不如前四项明显。
 
 命名隧道（固定域名）是第 7 步的可选项，需要 Cloudflare 账号 + 自有域名 + Tunnel Token，
 走 `tunnel.setConfig`；它解决的是「地址每次重开都变」这个体验问题，不是可用性问题。

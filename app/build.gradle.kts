@@ -38,6 +38,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // 注入的是**两个原始字段**，不是拼好的 URL。
         // 拼装交给 com.dsh.remote.BootstrapUrl（纯 JDK，有单测覆盖），
@@ -112,4 +113,13 @@ dependencies {
     // document-start 脚本：要在 DSH 前端读 localStorage 之前动手，只能靠这个 API
     implementation("androidx.webkit:webkit:1.12.0")
     testImplementation("junit:junit:4.13.2")
+
+    // 真机 instrumented 测试：WebView 的行为（document.title 对中文与 SPA 反复跳转的
+    // 表现、innerText 是否含被 CSS 隐藏的文案）在纯 JVM 单测里根本跑不出来，
+    // 而「页面判据」判错的代价是删用户 cookie，必须真跑一遍。
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("junit:junit:4.13.2")
 }

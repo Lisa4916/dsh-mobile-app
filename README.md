@@ -34,18 +34,23 @@ dsh-pocket 反向代理（认证 + cookie + 注入 launch token）
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `MainActivity.kt` | 911 | 连接列表 + 全屏 WebView + 扫码/手输 + 键盘避让编排 + 自愈动作执行 |
+| `MainActivity.kt` | 864 | 连接列表 + 全屏 WebView + 扫码/手输 + 键盘避让编排（只留必须有 Android 才能做的事） |
 | `WebViewFactory.kt` | 600 | WebView 配置的唯一出口（JS/DOM Storage/同域跳转/错误回调/document-start 脚本/键盘 hook） |
 | `Endpoint.kt` | 215 | 连接档案模型 + 5 列行式序列化 + URL 解析 + 入口类型推断（局域网/公网/本机） |
 | `ScanActivity.kt` | 187 | CameraX 预览 + ZXing 解码，只认真 http(s) 结果 |
+| `PageProbe.kt` | 173 | 页面状态判据：`JS_TITLE`/`JS_BODY` 只管取值，`classify()` 是纯函数，`decodeJsString()` 还原回调值 |
+| `RecoveryExecutor.kt` | 157 | 自愈编排：探针结果 → 动作，经 `RecoveryEnvironment` 接口注入副作用 |
 | `HandshakeHealGate.kt` | 131 | 自愈的节流闸门：每次事故最多动作 3 次、退避 5→10→20→30s |
 | `RecoveryPlanner.kt` | 129 | 页面状态 → 恢复动作的纯决策（不碰 Android API） |
 | `BackNavigationDecider.kt` | 82 | 返回键语义：会话页回首页、首页退出 App |
+| `ConnectionRepository.kt` | 69 | 档案读写接口 + `AutoConnect.decide()` 三态（Connect / Seed / ShowList） |
 | `BootstrapUrl.kt` | 68 | 内置地址拼接（host + PIN → 完整 URL），不硬编码任何真实地址 |
+| `CookieNames.kt` | 39 | 「删哪类 cookie」的唯一判据（`dsh-auth-*` vs `dsh_pocket_token`） |
 | `WebBridge.kt` | 28 | `@JavascriptInterface` 桥：`keyboardHeight()`（CSS px）、`isNativeShell()` |
 
-纯逻辑（Endpoint / RecoveryPlanner / HandshakeHealGate / BackNavigationDecider / BootstrapUrl）都不依赖 Android API，
-所以能被 JVM 单测覆盖 —— 测试全部打在这五个类上。
+**除 `MainActivity` / `WebViewFactory` / `ScanActivity` / `WebBridge` 外全部不依赖 Android API**，
+所以能被 JVM 单测覆盖。有「判断」的地方一律搬出 Activity —— 那里只剩造 UI、WebView 生命周期、
+`CookieManager` 调用、`Toast`、`evaluateJavascript` 求值。
 
 ## 测试
 
@@ -57,11 +62,24 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'; $env:ANDROID_HOME='D:\AndroidDev\sdk'; $en
 | 测试类 | 条数 | 覆盖 |
 |---|---|---|
 | `EndpointTest` | 24 | URL 解析、序列化往返、4 列老数据兼容、入口类型（含 CGNAT 100.64/10 判公网） |
+| `PageProbeTest` | 20 | 六种页面形态与优先级、长正文、null 兜底、`evaluateJavascript` 返回值还原 |
 | `RecoveryPlannerTest` | 14 | 页面状态 → 动作分派、「带 token 才清 pocket cookie」铁律、retry 参数插在 `#` 之前 |
+| `RecoveryExecutorTest` | 12 | 副作用断言（FakeEnv 记录）：清对 cookie、`ASK_USER` 不重放 Toast、退避与单轮额度 |
 | `BackNavigationDeciderTest` | 11 | 返回键三种语义 |
 | `BootstrapUrlTest` | 10 | 内置地址拼接、scheme/尾斜杠容错、空值返回 null |
+| `CookieNamesTest` | 10 | 前缀精确匹配、值里出现名字不算、过期指令只作用一个名字 |
 | `HandshakeHealGateTest` | 10 | 节流与退避 |
-| **合计** | **69** | |
+| `AutoConnectTest` | 7 | lastUsed 优先、无地址宁可停在列表、seed 的 kind 由 URL 推断 |
+| **合计** | **118** | |
+
+**真机 instrumented**：`androidTest/PageProbeJsTest` 7 条，验取值链路在真 WebView 里的行为
+（中文标题含 `·` 往返、`innerText` 跳过 `display:none`、`about:blank` 不崩）。
+
+```
+adb install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk   # -t 不能省
+adb shell am instrument -w -r -e class com.dsh.remote.PageProbeJsTest \\
+    com.dsh.remote.test/androidx.test.runner.AndroidJUnitRunner
+```
 
 CI 见 `.github/workflows/ci.yml`：`assembleDebug` + `testDebugUnitTest`（`--rerun-tasks`）+ `lintDebug`。
 lint 当前基线 **0 error / 27 warning**（warnings 不挡合并）。
@@ -165,8 +183,9 @@ $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | `tests=69 failures=0 errors=0 skipped=0`（5 个测试类） |
-| APK | 增量构建 7,516,844 B；`--rerun-tasks` 全量约 7,469,704 B |
+| 单元测试 | `tests=118 failures=0 errors=0 skipped=0`（9 个测试类） |
+| APK | 7,485,956 B（第 11 步后全量构建） |
+| 真机 instrumented | `PageProbeJsTest` 7 条 `OK (7 tests)`（`8PCE7LJB99VG7TRO`，Android 15） |
 | lint | 0 error / 27 warning |
 | 局域网 | 扫码/手输后进入 DSH 主界面 |
 | 公网 4G | 关 Wi-Fi 走 4G，Redmi `8PCE7LJB99VG7TRO` 一次通过（证据图 `docs/evidence/step7-public-4g.png`） |

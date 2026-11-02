@@ -187,7 +187,7 @@ async function main() {
   // 两者最终都进 OnBackPressedDispatcher，代码路径相同。
   const { execFileSync } = require('child_process');
   const ADB = 'D:\\AndroidDev\\sdk\\platform-tools\\adb.exe';
-  const DEV = process.env.DEV_SERIAL || '8PCE7LJB99VG7TRO';
+  const DEV = require('./device.cjs').resolveSerial(process.env.DEV_SERIAL);
   execFileSync(ADB, ['-s', DEV, 'shell', 'input', 'keyevent', 'KEYCODE_BACK']);
 
   // 逐帧记录 3 秒

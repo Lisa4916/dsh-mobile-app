@@ -10,7 +10,7 @@ const { execFileSync } = require('node:child_process');
 
 const PORT = 9222;
 const ADB = 'D:\\AndroidDev\\sdk\\platform-tools\\adb.exe';
-const SERIAL = '8PCE7LJB99VG7TRO';
+const SERIAL = require('./device.cjs').resolveSerial();
 
 function getJson(path) {
   return new Promise((resolve, reject) => {

@@ -2,7 +2,7 @@
 // 用法：node cdp-forward.cjs
 const { execFileSync } = require('node:child_process');
 const ADB = 'D:\\AndroidDev\\sdk\\platform-tools\\adb.exe';
-const SERIAL = '8PCE7LJB99VG7TRO';
+const SERIAL = require('./device.cjs').resolveSerial();
 
 function adb(args) {
   return execFileSync(ADB, ['-s', SERIAL, ...args], { encoding: 'utf8', timeout: 30000 }).trim();

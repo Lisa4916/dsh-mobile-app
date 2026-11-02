@@ -89,6 +89,40 @@ const CDP_PORT = process.argv[2] || '9222';
   await ws.cmd(i++, 'Network.enable', {});
   await ws.cmd(i++, 'Page.enable', {});
 
+  // 前置检查：本脚本只对「端点 URL 不带 ?token=」的场景有判定力。
+  // 若 App 里存的地址仍带 token，自愈会走 CLEAR_POCKET_COOKIE 并成功恢复主界面，
+  // 三项目标会全部判负 —— 那是**假阴性**，不是产品缺陷。
+  // 这个坑真踩过一次（端点还带 token 就跑，得出「ASK_USER 分支全错」的错误结论）。
+  //
+  // 判据不能看页面当前 URL：页面加载完已经是干净的 origin/，token 早被消费掉了。
+  // 必须看 App 存储里那条**端点地址**。用 adb + run-as 读，非 root 也能读自己的私有目录。
+  const { execFileSync } = require('child_process');
+  const ADB = 'D:\\AndroidDev\\sdk\\platform-tools\\adb.exe';
+  let storedList = '';
+  try {
+    const dev = require('./device.cjs').resolveSerial(process.env.DEV_SERIAL);
+    storedList = execFileSync(
+      ADB,
+      ['-s', dev, 'shell', 'run-as', 'com.dsh.remote', 'cat', 'shared_prefs/dsh_endpoints.xml'],
+      { encoding: 'utf8', timeout: 15000 },
+    );
+  } catch (e) {
+    console.error('读不到 dsh_endpoints.xml，无法确认前提：' + e.message);
+    process.exit(2);
+  }
+  // XML 里制表符/换行是实体，地址本身是明文，直接找 trycloudflare / 任意 host 上的 ?token=
+  const tokenEndpoints = storedList.match(/https?:\/\/[^&\s<]*\?token=/g) || [];
+  const tokenlessEndpoint = /https?:\/\/[^\s<]*trycloudflare\.com\/?(?=&|&#10;|<\/string>)/.test(storedList);
+  if (tokenEndpoints.length > 0 && !tokenlessEndpoint) {
+    console.error('\n中止：App 里存的端点**全部**带 ?token=。');
+    console.error('  本脚本验证的是「地址里没有 token 时不许动 cookie」这条铁律；');
+    console.error('  带 token 的地址走的是另一条分支（CLEAR_POCKET_COOKIE），跑下去只会得到假阴性。');
+    console.error('  请先把 dsh_endpoints.xml 里的端点改成不带 ?token= 的形式再运行。');
+    console.error('  实测证据：带 token 时三项会全判负，但那恰恰说明自愈是对的。');
+    process.exit(2);
+  }
+
+
   // 弄脏 cookie（模拟 dsh web 重启导致 sessionKey 变化后的失效 cookie）
   const stale = 'deadbeef'.repeat(8);
   await ws.cmd(i++, 'Network.setCookie', {

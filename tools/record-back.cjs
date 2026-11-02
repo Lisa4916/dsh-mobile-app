@@ -145,8 +145,23 @@ const STATE_JS = `
 
   // 沿用手势（左边缘内滑），走系统真实分发路径
   const { execFileSync } = require('child_process');
-  const ADB = 'D:\\AndroidDev\\sdk\\platform-tools\\adb.exe';
-  const DEV = process.env.DEV_SERIAL || '8PCE7LJB99VG7TRO';
+  const { ADB, resolveSerial } = require('./device.cjs');
+  const DEV = resolveSerial(process.env.DEV_SERIAL);
+  // 手势脚本现场生成，不依赖设备上预先存在的文件。
+  // 之前是写死读 /data/local/tmp/swipe.txt，换设备后文件不在，报的却是
+  // `monkey` 失败 —— 看着像手势不生效，实际是没东西可跑。
+  const swipeScript = [
+    'type= raw events',
+    'count= 2',
+    'speed= 1.0',
+    'start data >>',
+    'DispatchPointer(0,0,0,3,900,0,1,1,1,1,0,0)',
+    'DispatchPointer(0,0,0,120,900,0,1,1,1,1,0,0)',
+    'DispatchPointer(0,0,1,120,900,0,1,1,1,1,0,0)',
+    '',
+  ].join('\n');
+  const b64 = Buffer.from(swipeScript, 'utf8').toString('base64');
+  execFileSync(ADB, ['-s', DEV, 'shell', `echo ${b64} | base64 -d > /data/local/tmp/swipe.txt`]);
   execFileSync(ADB, ['-s', DEV, 'shell', 'monkey', '-p', 'com.dsh.remote',
     '-f', '/data/local/tmp/swipe.txt', '-v', '6']);
 

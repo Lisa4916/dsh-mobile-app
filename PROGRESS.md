@@ -27,10 +27,12 @@
 | 11 | 补 `androidTest`：`PageProbe` 判据拆成纯函数 + 真 WebView 取值验证 | ✅ | 真机 `OK (7 tests)`；`tests=118` |
 | 12 | 滑动返回不再闪侧栏（直接点屏外按钮，不展开侧栏） | ✅ | 真机 4 轮 `sideL` 全程 `-217` 不动；`tests=118`；lint 0/27 |
 | 13 | 知识库二次强化：纠 4 篇过时/错误结论 + 新增 3 篇 | ✅ | base 内 13 → 16 篇；`passage` 全部 `ready`；`kb-verify` 全绿 |
+| 14 | 安全与可见性修复：同域判定 / 状态栏前景 / 文案 / 渲染进程兜底 | ✅ | 全量 `tests=135`；真机四项逐条验证通过（第 14 步） |
 
-**测试基线：JVM 单测全量 `tests=118 failures=0 errors=0 skipped=0`**
+**测试基线：JVM 单测全量 `tests=135 failures=0 errors=0 skipped=0`**
 （`AutoConnectTest` 7 + `BackNavigationDeciderTest` 11 + `BootstrapUrlTest` 10 + `CookieNamesTest` 10 +
-`EndpointTest` 24 + `HandshakeHealGateTest` 10 + `PageProbeTest` 20 + `RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
+`EndpointTest` 24 + `HandshakeHealGateTest` 10 + `HostMatchTest` 17 + `PageProbeTest` 20 +
+`RecoveryExecutorTest` 12 + `RecoveryPlannerTest` 14）
 **真机 instrumented：`PageProbeJsTest` 7 条 `OK (7 tests)`**（`8PCE7LJB99VG7TRO`，Android 15）
 **APK：`app-debug.apk` 7,485,956 B**（versionName 0.1.0，versionCode 1）
 
@@ -804,6 +806,169 @@ APK 7,485,956 B。
 > `.knowledge-base.yml` 在 `kb-verify` 里报「解析失败」是**预期行为**：它是 manifest（`renderKnowledgeBaseManifest` 格式），
 > 不是知识文档，走的是另一个解析器。不要把它当问题追。
 
+---
+
+## 第 14 步：体检出的四个问题全部修掉 ✅
+
+`adb devices` 上换了一台机器 —— **`ZY22GHMK5F`（motorola XT2335-3 / Android 14 / WebView 117）**，
+Redmi `8PCE7LJB99VG7TRO` 不在线。体检（只读）之后按严重度修了前四项，后四项留到下一步。
+
+### 14.1 同域判定被绕过（最严重）
+
+**病灶**：`WebViewFactory.kt:53`
+
+```kotlin
+val sameHost = host.endpointHost?.let { url.contains(it, ignoreCase = true) } ?: false
+```
+
+`String.contains` 是**子串包含**，不是 host 比对。四种 URL 真机实测：
+
+| URL | 期望 | 修复前 | 修复后 |
+|---|---|---|---|
+| `https://<host>/page` | 留在 WebView | 留在 WebView ✅ | 留在 WebView ✅ |
+| `https://evil.com/?x=<host>` | 交给系统浏览器 | **留在 WebView ❌** | 交给系统浏览器 ✅ |
+| `https://<host>.evil.com/steal` | 交给系统浏览器 | **留在 WebView ❌** | 交给系统浏览器 ✅ |
+| `https://evil.com/#<host>` | 交给系统浏览器 | **留在 WebView ❌** | 交给系统浏览器 ✅ |
+
+危害不只是「显示了外部页面」：这个 WebView 没有地址栏，外面还挂着 `dshNative` JS 桥，
+被钓鱼页套进去之后，页面里的脚本就能调用 `WebViewFactory.JS_BRIDGE_NAME` 暴露的能力。
+
+**修法**：新建 `HostMatch.kt`，把判定抽成纯 JVM 对象（`android.net.Uri` 在单测里是空实现，
+所以走 `java.net.URI`）：
+
+- `isSameHost(target, allowedHost)`：规范化后 `host == allow` 或 `host.endsWith(".$allow")`。
+  **允许子域**是刻意的 —— quick tunnel 每次重开会换一个 `*.trycloudflare.com` 子域。
+  但 `endsWith(".$allow")` 要求点边界，所以 `evilexample.com` **不是** `example.com` 的子域。
+- `shouldOpenExternally(target, allowedHost)`：只对 `http://` / `https://` 生效，
+  `mailto:` / `tel:` / `about:` 维持旧行为（返回 false），不把系统 scheme 也丢给浏览器。
+
+`HostMatchTest` **17 条**，其中 6 条是**反面用例**（必须判外链）——价值全在这半边：
+`external_hostInQueryStringDoesNotCount`、`external_hostInFragmentDoesNotCount`、
+`external_hostAsSubdomainSuffixDoesNotCount`、`external_hostAsPathSegmentDoesNotCount`、
+`external_lookalikeWithoutDotBoundaryDoesNotCount`、`external_differentHost`。
+
+真机复验（在页面里插一个 `<a href="https://example.com/?x=<当前host>">` 再 `.click()`）：
+
+```
+clicked https://example.com/?x=producers-discharge-atmosphere-ppc.trycloudflare.com
+topResumedActivity=ActivityRecord{… u0 com.zui.browser/com.lenovo.browser.LeMainActivity t1545}
+```
+
+→ 真的交给了系统浏览器。修复前同一个 URL 会留在 App 里。
+
+### 14.2 状态栏前景不随页面切换
+
+**病灶**：`themes.xml:8` 的 `android:windowLightStatusBar=true` 是**静态值**，
+而窗口是 edge-to-edge（`MainActivity.kt` 里 `WindowCompat.setDecorFitsSystemWindows(window, false)`），
+状态栏底下直接就是页面本身。全仓库 `isAppearanceLightStatusBars|SYSTEM_UI_FLAG` = **0 处**。
+
+状态栏区域亮度采样（720×55，BT.601 加权）：
+
+```
+修复前 WebView 主界面   p50= 21 p99= 21 max= 21   ← 图标与背景同色，时间电量看不见
+修复后 WebView 主界面   p50= 21 p99=255 max=255   ← 图标已转浅色
+列表页（白底）           p50=255 p99=255          ← 图标保持深色，没被带反
+```
+
+**修法**：`MainActivity.applyBarIconTheme(darkBackground: Boolean)`，内部用
+`WindowCompat.getInsetsController(window, window.decorView)` 同时设
+`isAppearanceLightStatusBars` 与 `isAppearanceLightNavigationBars`（导航栏同理）。
+调用点只有两个：`connect()` 里 `applyBarIconTheme(true)`、`showList()` 里 `applyBarIconTheme(false)`。
+
+### 14.3 文案与事实矛盾
+
+原文案写「扫码即连，凭 PIN 由网页完成认证，**App 不保存任何密钥**」，
+但 `run-as com.dsh.remote cat shared_prefs/dsh_endpoints.xml` 里明明白白存着两条带 `?token=` 的地址。
+
+**没有改成「不存 token」**，而是改成说实话。理由：`?token=` 是一次性入口凭据，
+`dsh_pocket_token` 的寿命 = dsh web 进程寿命（`INTEGRATION.md` §2.1），
+不存地址就得每天电脑重启后重新扫码 —— 那是把可用性换一句漂亮话。
+
+新文案：
+
+```
+电脑端：设置 → 手机访问 → 局域网二维码
+地址（含访问 PIN）只保存在本机，不会上传；
+换电脑或不再使用这台，长按列表项删除
+```
+
+`allowBackup=false` + 非 root 读不到，实际风险不高；文字与其相符就够了。
+
+### 14.4 渲染进程没了就整个 App 跟着死
+
+**病灶**：全仓库 `onRenderProcessGone` = 0 处。不覆盖它时，系统的默认兜底是**杀掉宿主进程** ——
+用户看到的是「用着用着闪退」。而渲染进程被回收在这台机器上是常态，不是理论风险，
+第 7e 步的 logcat 里就抓到过：
+
+```
+ProcessSceneCleaner: SwipeUpClean: kill procName=com.google.android.webview:sandboxed_process0:…
+```
+
+渲染进程一死，那个 WebView 实例就永久失效：`loadUrl` 不报错也不加载，界面停在最后一帧，
+自愈救不了、返回键也脱不了身。唯一出路是换一个新 WebView。
+
+**修法**：
+- `WebViewFactory` 的 `WebViewClient` 覆盖 `onRenderProcessGone(view, detail)` → `host.onRenderProcessGone(detail.didCrash())`，**返回 true**（表示「我处理了」，阻止系统杀进程）。
+- `MainActivity.onRenderProcessGone(didCrash)`：日志 → `rebuildWebView()` → `current` 为空就 `showList()`，
+  否则 `recovery.reset()`（新连接要新预算）+ 显示 WebView + `applyBarIconTheme(true)` + `loadUrl(target.url)`。
+- `MainActivity.rebuildWebView()`：旧实例按 `onDestroy` 同一顺序销毁
+  （removeView → client 重置 → `webChromeClient=null` → `removeJavascriptInterface` → `stopLoading` →
+  `loadUrl("about:blank")` → `removeAllViews` → `destroy`），新实例插在 `progress` **之前**以保持层叠顺序。
+
+**验证方法（这个必须记下来）**：`pkill -9 -f sandboxed_process0` 会得到 `Operation not permitted`，
+非 root 杀不掉沙箱进程。唯一可靠触发是 **CDP 的 `Page.crash`** —— 新写了 `tools/crash-page.cjs`：
+
+```
+node tools/crash-page.cjs 9250
+```
+
+真机结果：
+
+```
+崩溃前 pid=23892
+发送 Page.crash …（socket 立刻断开，符合预期）
+崩溃后 pid=23892                       ← App 进程没被杀，兜底生效
+topResumedActivity=… com.dsh.remote/.MainActivity   ← 仍在 App 里
+11-02 11:43:45.086 23892 W DshRemote: render process gone (didCrash=true), rebuilding webview
+11-02 11:43:46.827 23892 W DshRemote: render process gone (didCrash=true), rebuilding webview
+```
+
+截图确认页面已重新加载回主界面（「探索未至之境 / 选择工作区」）。
+日志出现**两次**是正常的：`Page.crash` 让渲染进程崩了两次（第一次重建时旧连接还没完全断开）。
+
+### 14.5 结果
+
+```
+gradle :app:assembleDebug :app:testDebugUnitTest
+BUILD SUCCESSFUL in 17s
+tests=135 failures=0 errors=0 skipped=0
+（新增 HostMatchTest 17，其余 118 条不变）
+APK 7,485,956 B
+```
+
+### 14.6 顺带踩到的坑：应用分身里也有同名包
+
+装完新 APK 后启动，弹出「选择要使用的应用程序」，桌面上出现 **3 个同名「DSH 手机遥控」图标**：
+
+```
+pm list users  →  UserInfo{0:机主} + UserInfo{900:应用分身} + UserInfo{901:应用分身}
+pm list packages --user 900 | grep dsh.remote  →  package:com.dsh.remote
+pm list packages --user 901 | grep dsh.remote  →  package:com.dsh.remote
+```
+
+`am start` 反复落到 `android/com.android.internal.app.ResolverActivity`。
+解决：`pm uninstall --user 900 com.dsh.remote` + `--user 901`（各返回 `Success`），之后正常。
+
+**以后遇到「点图标弹选择器 / 桌面多个同名图标」，先 `pm list users` 查应用分身**，
+不要先怀疑 `am start` 的写法。
+
+更省事的做法：**装 APK 时直接只装给主用户** —— `adb shell pm install -r --user 0 <apk>`。
+`adb install -r` 默认对**所有用户**安装，所以清完分身再重装一次又会全部回来（这一步踩了第二次）。
+判据：`am start` 之后 `topResumedActivity` 直接是 `com.dsh.remote/.MainActivity` 而不是 `ResolverActivity`。
+
+---
+
+## 下一步
 
 1. ~~真机验证第 7b 步自愈~~ ✅ 已完成（第 7d 步，CDP 抓到 `retry+token` 重连）。
 2. ~~第 7 步公网远程连接~~ ✅ 已完成（第 7e 步）：隧道开启、真机 4G 进主界面、公网下自愈与 ASK_USER 两支都实测。

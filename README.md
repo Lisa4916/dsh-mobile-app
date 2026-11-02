@@ -34,8 +34,8 @@ dsh-pocket 反向代理（认证 + cookie + 注入 launch token）
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `MainActivity.kt` | 864 | 连接列表 + 全屏 WebView + 扫码/手输 + 键盘避让编排（只留必须有 Android 才能做的事） |
-| `WebViewFactory.kt` | 600 | WebView 配置的唯一出口（JS/DOM Storage/同域跳转/错误回调/document-start 脚本/键盘 hook） |
+| `MainActivity.kt` | 955 | 连接列表 + 全屏 WebView + 扫码/手输 + 键盘避让编排（只留必须有 Android 才能做的事） |
+| `WebViewFactory.kt` | 674 | WebView 配置的唯一出口（JS/DOM Storage/同域跳转/错误回调/document-start 脚本/键盘 hook） |
 | `Endpoint.kt` | 215 | 连接档案模型 + 5 列行式序列化 + URL 解析 + 入口类型推断（局域网/公网/本机） |
 | `ScanActivity.kt` | 187 | CameraX 预览 + ZXing 解码，只认真 http(s) 结果 |
 | `PageProbe.kt` | 173 | 页面状态判据：`JS_TITLE`/`JS_BODY` 只管取值，`classify()` 是纯函数，`decodeJsString()` 还原回调值 |
@@ -45,6 +45,7 @@ dsh-pocket 反向代理（认证 + cookie + 注入 launch token）
 | `BackNavigationDecider.kt` | 82 | 返回键语义：会话页回首页、首页退出 App |
 | `ConnectionRepository.kt` | 69 | 档案读写接口 + `AutoConnect.decide()` 三态（Connect / Seed / ShowList） |
 | `BootstrapUrl.kt` | 68 | 内置地址拼接（host + PIN → 完整 URL），不硬编码任何真实地址 |
+| `HostMatch.kt` | 63 | 「算不算同一个站」的唯一判据：host 精确比对 + 点子域边界，`mailto:`/`tel:` 不丢浏览器 |
 | `CookieNames.kt` | 39 | 「删哪类 cookie」的唯一判据（`dsh-auth-*` vs `dsh_pocket_token`） |
 | `WebBridge.kt` | 28 | `@JavascriptInterface` 桥：`keyboardHeight()`（CSS px）、`isNativeShell()` |
 
@@ -69,8 +70,9 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'; $env:ANDROID_HOME='D:\AndroidDev\sdk'; $en
 | `BootstrapUrlTest` | 10 | 内置地址拼接、scheme/尾斜杠容错、空值返回 null |
 | `CookieNamesTest` | 10 | 前缀精确匹配、值里出现名字不算、过期指令只作用一个名字 |
 | `HandshakeHealGateTest` | 10 | 节流与退避 |
+| `HostMatchTest` | 17 | 判同域 + **6 条反面用例**（host 在 query / fragment / 子域后缀 / 路径段 / 相似域名一律判外链） |
 | `AutoConnectTest` | 7 | lastUsed 优先、无地址宁可停在列表、seed 的 kind 由 URL 推断 |
-| **合计** | **118** | |
+| **合计** | **135** | |
 
 **真机 instrumented**：`androidTest/PageProbeJsTest` 7 条，验取值链路在真 WebView 里的行为
 （中文标题含 `·` 往返、`innerText` 跳过 `display:none`、`about:blank` 不崩）。
@@ -158,6 +160,10 @@ App 的处理（`RecoveryPlanner` + `HandshakeHealGate`）：
 6. **`adb exec-out screencap -p >` 会 CRLF 毁 PNG**，必须 `adb shell screencap -p /sdcard/x.png` + `adb pull`。
 7. **PowerShell 里 `$pid` 是只读自动变量**，脚本里改名 `$appPid`。
 8. **返回首页不能展开侧栏。** 收起态下 `.wtg9ga_newSession` 在屏幕外（`left = -207`），但 DOM 的 `click()` **不经过命中测试**，直接点就能回首页。旧实现为了点它先把侧栏展开，用户看到的就是一条黑边横扫屏幕（侧栏滑出再收回）。另外从点击到页面切完实测要**约 2000ms**，等待上限留短了会误判失败、退回那条展开侧栏的老路，等于白改。详见 `AGENTS.md` §6.20。
+9. **判同域不能用 `url.contains(host)`。** 那是子串包含：`https://evil.com/?x=<host>`、`https://<host>.evil.com/steal`、`https://evil.com/#<host>` 三种全被判成同域，外部整页留在没有地址栏的 WebView 里，外面还挂着 JS 桥。现在统一走 `HostMatch`（host 精确比对 + 点子域边界）。
+10. **`themes.xml` 里的 `windowLightStatusBar` 只在启动那一刻生效。** edge-to-edge 下状态栏底下就是页面本身，页面是深色（实测状态栏区域亮度 `p50=21`）而图标也是深色，时间电量直接看不见。进出页面要各调一次 `applyBarIconTheme`。
+11. **不覆盖 `onRenderProcessGone` 的话，渲染进程被回收会把整个 App 带走。** 而渲染进程被清在这台机器上是常态（logcat：`ProcessSceneCleaner: SwipeUpClean: kill procName=…:sandboxed_process0`）。死掉的 WebView 不能复用，`loadUrl` 静默不生效，只能销毁重建。非 root 杀不掉沙箱进程，验证要用 CDP 的 `Page.crash`（`tools/crash-page.cjs`）。
+12. **应用分身里也会装同名包。** 桌面上出现 3 个同名图标、点图标弹「选择要使用的应用程序」时，先 `pm list users` 查 900/901 分身用户，再 `pm uninstall --user N <pkg>`。别先怀疑 `am start` 的写法。
 
 ## 构建
 
@@ -184,8 +190,8 @@ $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | `tests=118 failures=0 errors=0 skipped=0`（9 个测试类） |
-| APK | 7,485,956 B（第 11 步后全量构建） |
+| 单元测试 | `tests=135 failures=0 errors=0 skipped=0`（10 个测试类） |
+| APK | 7,485,956 B（第 14 步后全量构建） |
 | 真机 instrumented | `PageProbeJsTest` 7 条 `OK (7 tests)`（`8PCE7LJB99VG7TRO`，Android 15） |
 | lint | 0 error / 27 warning |
 | 局域网 | 扫码/手输后进入 DSH 主界面 |
@@ -220,6 +226,7 @@ $adb = 'D:\AndroidDev\sdk\platform-tools\adb.exe'
 | `probe-sessions.cjs` | 打开侧栏并列出会话条目，用于「进会话→按返回」的重放 |
 | `probe-sidebar.cjs` | 列出按钮几何与 `aria-label`，页面改版后重新定位选择器 |
 | `record-back.cjs` | 触发返回 + CDP 连拍 + DOM 采样，抓 1 秒内中间态；**验证返回动效是否闪屏就看它** |
+| `crash-page.cjs` | 用 CDP `Page.crash` 让渲染进程真崩，验证 `onRenderProcessGone` 兜底（非 root 的 `pkill` 杀不掉沙箱进程） |
 
 `_` 前缀的是早期一次性探针（`_probe-cur.cjs`、`_probe-page.cjs`、`_probe-storage.cjs`、`_tabs.cjs`、`_test-reset.cjs`），留作参考，不进主流程。
 
@@ -227,8 +234,11 @@ CDP 转发要点：`cat /proc/net/unix | grep webview_devtools_remote` 会返回
 
 ## 待办（下一档 B）
 
-- `androidTest` 覆盖仍不全：WebView 同域判定、cookie 清除→重导航、键盘 insets、扫码链路只有手跑脚本
-- `MainActivity` 仍有 864 行：`buildUi()` 约 128 行代码造 UI（无 layout XML），可拆 `HomeView` / `WebPanel`
+- 体检剩余四项：删掉零使用的权限（`POST_NOTIFICATIONS` / `ACCESS_NETWORK_STATE`）与 9 条无用资源、
+  release 构建补齐（`proguard-rules.pro` 缺失 + 无签名）、长按删除加确认、收敛 39 处中文字面量与 8 处硬编码颜色
+- `androidTest` 覆盖仍不全：cookie 清除→重导航、键盘 insets、扫码链路只有手跑脚本
+  （同域判定已在第 14 步补成 17 条 JVM 单测）
+- `MainActivity` 仍有 955 行：`buildUi()` 约 128 行代码造 UI（无 layout XML），可拆 `HomeView` / `WebPanel`
 - 隧道地址自动读回（quick tunnel 每次变，现在要手动重扫；走 dsh-pocket 的 `pocket.status` RPC）
 - 前台服务保活（现在靠 `svc power stayon true`，不该长期开）
 - 任务完成通知（DSH 的 SSE 完成事件）

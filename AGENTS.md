@@ -39,7 +39,7 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
-# 构建 + 单测（两条一起跑，基线 tests=118 failures=0）
+# 构建 + 单测（两条一起跑，基线 tests=135 failures=0）
 & 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
     -p 'D:\dsh-mobile-app' :app:assembleDebug :app:testDebugUnitTest --console=plain -q
 
@@ -99,8 +99,10 @@ dsh.lanPin=<token-lan 的内容>
 | 7d | 真机 USB 接入 + 第 7b 步真机复验 | ✅ |
 | 7e | 公网隧道开启 + 真机 4G 验证 + ASK_USER 分支实测 | ✅ |
 | 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness`；后续两次强化共 16 篇 | ✅ 见 §8 |
+| 11 | 体检出的四个问题：同域判定 / 状态栏前景 / 文案 / 渲染进程兜底 | ✅ 见 §6.21–§6.23 |
 | 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
 | 10 | 任务完成通知 / 文件拍照附件 / 局域网自动发现 / 多电脑一键切换 | ⏳ |
+| 12 | 体检剩余四项：删无用权限与资源 / release 补齐 / 长按删除加确认 / 收敛 strings 与颜色 | ⏳ |
 
 **第 7 项现状（2026-11-02 重测，旧结论已作废）**：`cloudflared.exe` 在
 `C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B，2026.10.7）。
@@ -139,12 +141,19 @@ app/src/main/java/com/dsh/remote/
 │                        applyKeyboardInsets(insets, animated) / dispatchKeyboard(h)
 │                        applyKeyboardHeight(h) → 只改 listRoot 的 bottomMargin
 │                        notifyPageKeyboard(px) → 换算 CSS px 后 evaluateJavascript
+│                        applyBarIconTheme(darkBackground) → 状态栏/导航栏前景随页面底色切换（§6.23）
+│                        onRenderProcessGone / rebuildWebView() → 渲染进程没了就换新 WebView（§6.22）
 │                        onPageFinished / onPageError / onProgress / openExternal
 ├── WebViewFactory.kt    WebView 配置的唯一出口
 │                        create(host)：JS 开关、DOM Storage、同域跳转拦截、错误回调、
 │                        背景色 0xFF151517、installHomeResetOnStart()、注入 KEYBOARD_HOOK_JS
 │                        HOME_RESET_JS / KEYBOARD_HOOK_JS 两个常量
 ├── WebBridge.kt         @JavascriptInterface，注入名 "dshNative"
+├── HostMatch.kt         「算不算同一个站」的唯一判据（纯 JVM，只用 java.net.URI）
+│                        isSameHost(target, allowedHost)：完全相等 或 host.endsWith(".allowed")
+│                        shouldOpenExternally(target, allowedHost)：只对 http(s) 生效，
+│                          mailto:/tel:/about: 一律 false（否则点电话链接会把浏览器踹出来）
+│                        ⚠ 以前是 url.contains(host) —— 子串包含，evil.com/?x=<host> 等三种绕过全成功
 ├── CookieNames.kt       「删哪类 cookie」的唯一判据（纯 JVM）
 │                        AUTH_PREFIX / POCKET / selectForRemoval(all, pocket) / expiryDirective
 │                        ⚠ 以前这段逻辑在 Activity 里写了两遍（clearAuthCookies 与
@@ -184,6 +193,9 @@ app/src/main/java/com/dsh/remote/
 │                          seed 的 kind 由 URL 推断、不改写已拼好的地址
 ├── PageProbeTest.kt     20 条单测：六种页面形态 + 优先级（主界面 > 故障 > PIN）、
 │                          长正文、null 兜底、evaluateJavascript 返回值还原（\\uXXXX / null / 转义）
+├── HostMatchTest.kt     17 条单测：判同域（完全相等 / 带路径 query / 大小写 / 尾点 / 子域 / 局域网 IP）
+│                          与 **6 条反面用例**（host 出现在 query / fragment / 子域后缀 /
+│                          路径段 / 相似域名 evilexample.com / 完全不同的 host 都必须判外链）
 ├── RecoveryExecutorTest.kt 12 条单测：FakeEnv 记录副作用，钉住「没有 token 时绝不清 pocket
 │                          cookie」「ASK_USER 不重放 Toast」「退避与单轮额度」
 └── RecoveryPlannerTest.kt 14 条单测：fromProbe 映射、plan 分支穷举、hasPinToken
@@ -422,6 +434,74 @@ node .\tools\tap.cjs 540 613 8PCE7LJB99VG7TRO   # 坐标 + 序列号
 只要中途出现 `sideL=0` 就说明还在走展开侧栏那条路。截图见
 `build-artifacts/back-frames/frame-005.jpg`（干净的首页）与 `frame-001/002.jpg`（修复前的闪屏）。
 
+### 6.21 判同域一律走 `HostMatch`，**别再写 `url.contains(host)`**
+
+旧实现在 `WebViewFactory.kt:53` 用 `url.contains(endpointHost)` 判同域，那是**子串包含**。
+真机实测三种绕过全部成功：`https://evil.com/?x=<host>`、`https://<host>.evil.com/steal`、
+`https://evil.com/#<host>` —— 外部整页留在没有地址栏的 WebView 里，外面还挂着 `dshNative` JS 桥。
+
+铁律：
+1. 判同域、判外链**只能**调 `HostMatch.isSameHost` / `HostMatch.shouldOpenExternally`。
+2. `shouldOpenExternally` 只对 `http://` / `https://` 生效，`mailto:` / `tel:` / `about:` 必须返回 false
+   （否则点电话链接会把浏览器踹出来）。
+3. 允许子域（`host.endsWith(".$allow")`）是刻意的：quick tunnel 每次重开换一个
+   `*.trycloudflare.com` 子域。点边界保证 `evilexample.com` 不算 `example.com` 的子域。
+4. `HostMatch` 里**只用 `java.net.URI`**（经 `Endpoint.hostOf`），不要用 `android.net.Uri` ——
+   后者在 JVM 单测里是空实现，`host` 恒为 null，测试会全绿但真机行为相反。
+
+验证：`HostMatchTest` 17 条，其中 6 条反面用例价值最大。真机复验方法是在页面里插一个
+`<a href="https://example.com/?x=<当前host>">` 再 `.click()`，看 `topResumedActivity` 是否变成浏览器。
+
+### 6.22 渲染进程被回收后 App 会跟着死 —— 必须覆盖 `onRenderProcessGone`
+
+不覆盖 `WebViewClient.onRenderProcessGone` 时，系统的默认兜底是**杀掉宿主进程**，用户看到闪退。
+这台机器上渲染进程被清是常态（第 7e 步 logcat：`ProcessSceneCleaner: SwipeUpClean: kill procName=…:sandboxed_process0:…`）。
+
+三条约束：
+1. 回调里**必须 return true**，否则系统的杀进程兜底照样生效。
+2. 死掉的 WebView **不能复用**：它的 `loadUrl` 不报错也不加载。只能按
+   `onDestroy` 的顺序销毁（`removeJavascriptInterface` 那一步不能省）再 `WebViewFactory.create` 一个新的。
+3. 新实例要插在 `progress` **之前**，否则进度条会被整页 WebView 盖住。
+
+**怎么验**：`pkill -9 -f sandboxed_process0` 会得到 `Operation not permitted`（非 root 杀不掉沙箱进程）。
+唯一可靠触发是 CDP 的 `Page.crash` —— `node tools/crash-page.cjs <cdpPort>`。
+判据三条：App 的 `pidof` 不变、logcat 出现 `render process gone (didCrash=true), rebuilding webview`、
+页面自己回到主界面。日志出现两次是正常的（`Page.crash` 让进程崩了两次）。
+
+### 6.23 edge-to-edge 下状态栏前景必须跟着页面底色切
+
+`themes.xml` 里的 `android:windowLightStatusBar` 是**静态值**，只在启动那一刻生效。
+本项目 `WindowCompat.setDecorFitsSystemWindows(window, false)` 之后状态栏底下就是页面本身，
+页面是深色（实测状态栏区域亮度 `p50=21`）而图标也是深色 → 时间电量看不见。
+
+铁律：页面**进/出**两处各调一次 `MainActivity.applyBarIconTheme(darkBackground)`（`connect()` 传 true、
+`showList()` 传 false），内部用 `WindowCompat.getInsetsController` 同时设
+`isAppearanceLightStatusBars` 与 `isAppearanceLightNavigationBars`。
+不要改成在主题里写死 —— 列表页是白底，写死必然坏一半。
+
+### 6.24 SamSung/摩托罗拉**应用分身**里也有同名包，会弹「选择要使用的应用程序」
+
+装完新 APK 后点图标弹选择器、桌面出现 3 个同名图标时，先查用户：
+
+```
+adb shell pm list users                             # 会看到 UserInfo{0:机主} + 900/901 应用分身
+adb shell pm list packages --user 900 | grep <pkg>  # 命中的话这就是元凶
+adb shell pm uninstall --user 900 <pkg>             # 每个分身用户都清一遍
+```
+
+不要先怀疑 `am start` 的写法 —— `topResumedActivity=android/com.android.internal.app.ResolverActivity`
+就说明是**系统在选择器阶段**，跟 Activity 名对不对无关。
+
+**注意 `adb install -r` 会把分身里的包一起装回来**（默认对所有用户安装）。
+所以每次重装之后都要么再清一遍分身，要么干脆只装给 user 0：
+
+```
+adb shell pm install -r --user 0 <apk>     # 只装主用户
+```
+
+判据：`am start` 之后 `topResumedActivity` 直接是 `com.dsh.remote/.MainActivity`，
+而不是 `ResolverActivity`。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）
@@ -450,6 +530,7 @@ node .\tools\tap.cjs 540 613 8PCE7LJB99VG7TRO   # 坐标 + 序列号
 | `probe-sidebar.cjs` | 列出所有按钮几何、`aria-label`、侧栏容器位置。页面版本变化后靠它重新定位选择器 |
 | `probe-back-nav.cjs` | `node probe-back-nav.cjs <cdpPort> [--state\|--back]`，打印页面位置/侧栏几何，`--back` 触发返回并逐帧采样 + 抓 Document 事件 |
 | `record-back.cjs` | `node record-back.cjs <cdpPort> [帧数] [间隔ms] [目录]`，触发返回 + CDP 连拍 + DOM 采样，能抓到 1 秒内的中间态。**验证返回动效是否闪屏就看它**（§6.20） |
+| `crash-page.cjs` | `node crash-page.cjs <cdpPort>`，用 CDP `Page.crash` 让渲染进程真的崩掉，验证 `onRenderProcessGone` 兜底（§6.22）。非 root 的 `pkill` 杀不掉沙箱进程，只能靠它 |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 

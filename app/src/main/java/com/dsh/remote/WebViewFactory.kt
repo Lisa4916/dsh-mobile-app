@@ -49,9 +49,13 @@ object WebViewFactory {
                 request: android.webkit.WebResourceRequest,
             ): Boolean {
                 val url = request.url.toString()
-                // 只在自己这台电脑的入口里跳转，外部链接交给系统浏览器
-                val sameHost = host.endpointHost?.let { url.contains(it, ignoreCase = true) } ?: false
-                if (!sameHost && (url.startsWith("http://") || url.startsWith("https://"))) {
+                // 只在自己这台电脑的入口里跳转，外部链接交给系统浏览器。
+                //
+                // 判定必须比 host，不能比「字符串里有没有出现 host」——那是子串包含，
+                // https://evil.com/?x=<host> 与 https://<host>.evil.com/ 都会命中，
+                // 外部页面就留在没有地址栏的 WebView 里（还挂着 dshNative JS 桥）。
+                // 规则与全部反面用例见 HostMatch / HostMatchTest。
+                if (HostMatch.shouldOpenExternally(url, host.endpointHost)) {
                     host.openExternal(url)
                     return true
                 }
@@ -76,6 +80,29 @@ object WebViewFactory {
                 if (request.isForMainFrame) {
                     host.onPageError(error.errorCode, error.description?.toString())
                 }
+            }
+
+            /**
+             * 渲染进程被系统回收或崩溃。
+             *
+             * 不覆盖这个方法的默认后果是**整个 App 进程被杀**（系统的兜底是"宿主也一起死"），
+             * 用户看到闪退。这里返回 true 表示「我自己处理了」，把控制权留在 Activity 里，
+             * 由 [MainActivity.onRenderProcessGone] 换一个新的 WebView 重新连。
+             *
+             * 这台机器上渲染进程被清是常态，logcat 抓到过：
+             * `ProcessSceneCleaner: SwipeUpClean: kill procName=…:sandboxed_process0:…`
+             */
+            override fun onRenderProcessGone(
+                view: WebView,
+                detail: android.webkit.RenderProcessGoneDetail,
+            ): Boolean {
+                // didCrash() 是 API 26 才有的；minSdk 24 上这个方法本身就不会被回调
+                // （onRenderProcessGone 也是 API 26 加入 WebViewClient 的），
+                // 这里的版本判断只是为了让 lint 的 NewApi 检查放行，不是活代码。
+                val didCrash = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+                    detail.didCrash()
+                host.onRenderProcessGone(didCrash)
+                return true
             }
         }
 

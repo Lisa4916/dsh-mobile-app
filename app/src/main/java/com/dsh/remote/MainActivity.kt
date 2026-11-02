@@ -417,8 +417,20 @@ class MainActivity : AppCompatActivity() {
         column.addView(scanBtn)
 
         column.addView(TextView(this).apply {
+            // 这段文案说的是**事实**，不是宣传语。
+            //
+            // 旧文案写「扫码即连，凭 PIN 由网页完成认证，App 不保存任何密钥」——
+            // 实测是假的：地址（含 `?token=<PIN>`）原样落在
+            // `/data/data/com.dsh.remote/shared_prefs/dsh_endpoints.xml` 里，明文。
+            //
+            // 为什么不改成「真的不存」：`?token=` 是 dsh-pocket 的**一次性入口凭据**，
+            // 消费掉之后靠 cookie 维持会话；而 cookie 寿命等于 dsh web 进程寿命
+            // （见 INTEGRATION.md §2.1），电脑一重启就要重新走一次 `?token=`。
+            // 不存 token 的代价是「每次电脑重启都要重新扫码」，那比明文落盘更难用。
+            // 所以这里选择说实话，并给出用户能自己做的动作（长按删除）。
             text = "电脑端：设置 → 手机访问 → 局域网二维码\n" +
-                "扫码即连，凭 PIN 由网页完成认证，App 不保存任何密钥"
+                "地址（含访问 PIN）只保存在本机，不会上传；\n" +
+                "换电脑或不再使用这台，长按列表项删除"
             textSize = 12f
             setTextColor(INK_DIM)
             setPadding(0, dp(16), 0, 0)
@@ -554,6 +566,7 @@ class MainActivity : AppCompatActivity() {
         webView.visibility = View.VISIBLE
         progress.visibility = View.VISIBLE
         progress.progress = 0
+        applyBarIconTheme(darkBackground = true)
         webView.loadUrl(endpoint.url)
     }
 
@@ -561,7 +574,29 @@ class MainActivity : AppCompatActivity() {
         webView.visibility = View.GONE
         listRoot.visibility = View.VISIBLE
         progress.visibility = View.GONE
+        applyBarIconTheme(darkBackground = false)
         refreshSavedList()
+    }
+
+    /**
+     * 状态栏图标前景跟着**当前可见页面的底色**走。
+     *
+     * 病灶：`themes.xml` 里 `android:windowLightStatusBar=true` 是静态值，含义是
+     * 「背景浅，请用深色图标」——那对白底的连接列表是对的。但 WebView 页面底色是
+     * `#151517`，一直沿用深色图标的结果是深灰压近黑。真机截图实测状态栏区域亮度：
+     * 主界面 `p50=21 / max=21`（几乎全黑，时间与电量根本看不清），
+     * 列表页 `p50=255 / max=255`（正常）。
+     *
+     * 因为窗口是 edge-to-edge（[applyImeInsets] 里 `setDecorFitsSystemWindows(false)`），
+     * 状态栏底下就是页面本身，没有一层系统绘制的背景可以指望，只能靠这里切前景色。
+     *
+     * @param darkBackground 页面底色是深色时传 true → 用浅色（白）图标。
+     */
+    private fun applyBarIconTheme(darkBackground: Boolean) {
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !darkBackground
+            isAppearanceLightNavigationBars = !darkBackground
+        }
     }
 
     private fun requestScan() {
@@ -722,6 +757,71 @@ class MainActivity : AppCompatActivity() {
     internal fun onProgress(p: Int) {
         progress.progress = p
         if (p >= 100) progress.visibility = View.GONE
+    }
+
+    /**
+     * 渲染进程没了 —— 重建 WebView，别让整个 App 跟着死。
+     *
+     * 为什么必须有这个兜底：不覆盖 `WebViewClient.onRenderProcessGone` 时，系统的默认行为是
+     * **杀掉宿主进程**，用户看到的就是「用着用着闪退」。而渲染进程被回收在这台机器上是常态，
+     * 不是理论风险 —— 第 7e 步的 logcat 里就抓到过：
+     *
+     * ```
+     * ProcessSceneCleaner: SwipeUpClean: kill procName=com.google.android.webview:sandboxed_process0:…
+     * ```
+     *
+     * 渲染进程一死，那个 WebView 实例就永久失效：`loadUrl` 不报错也不加载，界面停在最后一帧，
+     * 既不能靠自愈救，也不能靠返回键脱身。唯一出路是换一个新 WebView。
+     *
+     * 这里**必须**把死掉的 WebView 从视图树里摘掉并 `destroy()`，否则会在 ViewRootImpl 里
+     * 留下一个永不绘制的子 View，且它仍持有旧的 client 与 JS 桥。
+     *
+     * @param didCrash true=渲染进程崩溃（页面代码把它搞挂了），false=被系统回收（内存压力）。
+     *   两种都要重建；区分只用于日志——崩溃的话日志里能看到是哪次页面操作引起的。
+     */
+    internal fun onRenderProcessGone(didCrash: Boolean) {
+        android.util.Log.w("DshRemote", "render process gone (didCrash=$didCrash), rebuilding webview")
+        val target = current
+        rebuildWebView()
+        if (target == null) {
+            showList()
+            return
+        }
+        // 新 WebView 是干净的，当前入口的 URL 里仍带着 ?token=，直接重新走一遍握手。
+        // 这是一次新的连接，闸门预算也要重置，否则会被上一轮的退避挡住。
+        recovery.reset()
+        listRoot.visibility = View.GONE
+        webView.visibility = View.VISIBLE
+        progress.visibility = View.VISIBLE
+        progress.progress = 0
+        applyBarIconTheme(darkBackground = true)
+        webView.loadUrl(target.url)
+    }
+
+    /**
+     * 换一个新的 WebView 进来，旧的销毁。
+     *
+     * 新实例插在 [progress] 之前，保持 `listRoot → webView → progress` 的层叠顺序
+     * （进度条必须在最上层，否则会被整页 WebView 盖住）。
+     *
+     * 销毁顺序与 [onDestroy] 一致，理由见那里的注释：先摘出视图树、再断开所有指向
+     * 本 Activity 的引用，最后 destroy。
+     */
+    private fun rebuildWebView() {
+        if (this::webView.isInitialized) {
+            root.removeView(webView)
+            webView.webViewClient = android.webkit.WebViewClient()
+            webView.webChromeClient = null
+            webView.removeJavascriptInterface(WebViewFactory.JS_BRIDGE_NAME)
+            webView.stopLoading()
+            webView.loadUrl(BLANK_PAGE)
+            webView.removeAllViews()
+            webView.destroy()
+        }
+        val fresh = WebViewFactory.create(this).apply { visibility = View.GONE }
+        val index = if (this::progress.isInitialized) root.indexOfChild(progress) else -1
+        if (index >= 0) root.addView(fresh, index) else root.addView(fresh)
+        webView = fresh
     }
 
     internal fun openExternal(url: String) {

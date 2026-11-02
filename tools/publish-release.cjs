@@ -68,7 +68,12 @@ function writeVersion(code, name) {
   fs.writeFileSync(f, next, 'utf8');
 }
 
-function bump(kind) {
+/**
+ * 算下一个版本号。`persist = false`（--dry）时**只算不写** ——
+ * 第一版不管 dry 都写盘，试跑一次就把 version.properties 改了，
+ * 于是 `git status` 变脏、下次真发版的 tag 也跟着错。
+ */
+function bump(kind, persist) {
   const v = readVersion();
   const parts = v.name.split('.').map((n) => parseInt(n, 10) || 0);
   while (parts.length < 3) parts.push(0);
@@ -76,7 +81,7 @@ function bump(kind) {
   else if (kind === 'minor') { parts[1] += 1; parts[2] = 0; }
   else { parts[2] += 1; }
   const next = { code: v.code + 1, name: parts.join('.') };
-  writeVersion(next.code, next.name);
+  if (persist) writeVersion(next.code, next.name);
   return { from: v, to: next };
 }
 
@@ -107,20 +112,21 @@ function main() {
   }
 
   // ---- bump ----
-  let v = readVersion();
+  const v = readVersion();
   if (!noBump) {
-    const { from, to } = bump(bumpKind);
-    console.log(`版本 ${from.name}(${from.code}) → ${to.name}(${to.code})`);
+    const { from, to } = bump(bumpKind, !dry);
+    console.log(`版本 ${from.name}(${from.code}) → ${to.name}(${to.code})${dry ? '（--dry，未写盘）' : ''}`);
     console.log('');
+    if (dry) {
+      console.log('真实执行时会改 version.properties，并要求你先提交它再打 tag。');
+      return;
+    }
     console.log('version.properties 已改，需要先提交它再打 tag：');
     console.log('  git add version.properties');
     console.log(`  git commit -m "chore(release): 版本升到 ${to.name}"`);
     console.log('');
-    if (!dry) {
-      fail('请先提交版本号变更，然后重跑本脚本并加 --no-bump。\n' +
-           '（脚本不替你 commit，是为了让「这个 tag 对应哪次提交」永远清楚。）');
-    }
-    return;
+    fail('请先提交版本号变更，然后重跑本脚本并加 --no-bump。\n' +
+         '（脚本不替你 commit，是为了让「这个 tag 对应哪次提交」永远清楚。）');
   }
 
   const tag = 'v' + v.name;

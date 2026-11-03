@@ -3,6 +3,17 @@
 > 任务、环境变量、纪律、踩坑清单，全部在 [`AGENTS.md`](D:\dsh-mobile-app\AGENTS.md)。
 > 本文件只记「做了什么、验证证据是什么、下一步接哪里」。
 
+## 换窗口接手（写在这里，免得每次都翻 AGENTS）
+
+`D:\dsh-mobile-app` 有独立 `.git`，是独立项目根。DSH 的规则是「项目根 = 从 cwd 往上第一个含 `.git` 的目录」，
+只加载这条链上的 `AGENTS.md`。所以在别的窗口：
+
+- **正解**：新会话工作目录直接设 `D:\dsh-mobile-app`；
+- 否则开头明说「读 `D:\dsh-mobile-app\AGENTS.md` 与 `PROGRESS.md`，继续第 N 步」；
+- 命令行：`cd /d D:\dsh-mobile-app && dsh headless "…"`（`headless` 取进程 cwd）。
+
+详见 `AGENTS.md` §1.5（含可直接粘贴的交接卡）。
+
 ---
 
 ## 状态总览

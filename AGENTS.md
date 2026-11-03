@@ -74,6 +74,45 @@ dsh.lanPin=<token-lan 的内容>
 
 ---
 
+## 1.5 换个窗口/新会话来接手，怎么让这个项目「认得出来」
+
+DSH 的指令加载规则（`@deepseek-ai/dsh-agent-instructions`）只有两条，记牢就不会串项目：
+
+1. **项目根 = 从 `cwd` 往上找第一个含 `.git` 的目录**（`DEFAULT_PROJECT_ROOT_MARKERS = [".git"]`）。
+2. 加载 **用户全局 `AGENTS.md` → 项目根到 `cwd` 这条链上每一级的 `AGENTS.md`/`CLAUDE.md`**（`AGENTS.local.md` 优先级更高）。
+
+`D:\DeepSeek Harness` 和 `D:\dsh-mobile-app` **各自都有 `.git`**，是两个独立项目根 ⇒
+`D:\dsh-mobile-app` 的 `AGENTS.md`（这份）**只有在 cwd 落在它里面时才会被加载**。
+
+| 在其他窗口怎么起 | 结果 |
+|---|---|
+| 新会话把**工作目录设成 `D:\dsh-mobile-app`** | ✅ 只加载本文件，最干净 |
+| 在 `D:\DeepSeek Harness` 里开会话，让我「看 dsh-mobile-app」 | 只加载 `D:\DeepSeek Harness\AGENTS.md`（全局路由表），本文件**不会**自动进来 → 必须显式说「读 `D:\dsh-mobile-app\AGENTS.md`」 |
+| 用 `dsh headless "…"` 命令行跑 | ✅ **必须先 `cd` 进去**（`headless` 没有 `--cwd`，工作目录取进程 cwd）；`--json` 输出机器可读事件，`--session-id` 可续跑 |
+| 换一台机器 / 换用户 | 把本目录（或 git clone）放好，再开新会话 |
+
+**懒人版一句话**（在任意窗口直接发）：
+
+```
+读 D:\dsh-mobile-app\AGENTS.md 与 PROGRESS.md，然后继续第 N 步
+```
+
+或直接把下面这段当「交接卡」发给新窗口：
+
+```
+项目：D:\dsh-mobile-app（Android WebView 外壳，包名 com.dsh.remote）
+入口文件：AGENTS.md（构建/路由/踩坑）、PROGRESS.md（步骤与证据）、README.md（对外说明）
+构建前必须设：JAVA_HOME=D:\AndroidDev\jdk17  ANDROID_HOME=D:\AndroidDev\sdk  ANDROID_SDK_ROOT=D:\AndroidDev\sdk
+gradle：C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat
+基线：tests=235 failures=0；lint 0 error / 22 warning；release APK 1,947,334 B
+当前版本：0.5.0（versionCode=5）；最新 Release v0.5.0
+真机：ZY22GHMK5F(motorola/Android 14) 或 8PCE7LJB99VG7TRO(Redmi/Android 15)，用 tools/device.cjs 自动识别
+```
+
+> **不要**把全局路由表（`D:\DeepSeek Harness\AGENTS.md`）当作本项目的事实来源 ——
+> 它只负责「关键词 → 去哪个项目」，不含本项目的构建方式与踩坑。
+
+---
 ## 2. 用户的工作方式
 
 - **一步一个会话**。每完成一步：跑测试 → 更新 `PROGRESS.md` → 停止。

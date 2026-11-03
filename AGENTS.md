@@ -817,11 +817,17 @@ https://github.com/<owner>/<repo>/releases/latest/download/dsh-remote-latest.apk
    **增量模式还必须显式发删除条目。** 只搬「改动文件」时，远端 `base_tree` 里那些被删的、
    或被 rename 掉的源路径会原样留着，于是远端树比本地树多出十几个文件、sha 永远对不上。
    两个细节：
-   1. `git diff --name-only` 对 rename **只吐目标路径**，源路径得用 `--diff-filter=D` 单独抓，
-      更稳的做法是直接比 `git ls-tree -r --name-only <base>` 与 `HEAD` 的差集。
+   1. `git diff --name-only` 对 rename **只吐目标路径**，`--diff-filter=D` 也抓不到这些源路径
+      （实测 24 个 kb 文件被 rename/归档，`--diff-filter=D` 只报出 1 个真删）。
+      稳的做法是直接比清单：`git ls-tree -r --name-only <base>` 减去 `HEAD` 的清单。
    2. 删除在 base_tree 模式下的唯一写法是 `{ path, mode:'100644', type:'blob', sha: null }`。
       而且这些源路径会混在 `changedFiles` 里，循环时必须先跳过，否则 `git cat-file blob HEAD:<已删路径>`
-   直接 `fatal: path ... does not exist in 'HEAD'`。
+      直接 `fatal: path '…' does not exist in 'HEAD'`。
+
+   **base 参数必须是本地存在的提交。** 走 API 推上去的提交（如 `e2a638c`）本地对象库里没有，
+   `git diff e2a638c..HEAD` 会报 `ambiguous argument`。此时基线要换成它对应的本地提交
+   （`5f654c1`），或者先 `git fetch`（本机通常 fetch 不动，见下）。推完本地与远端 sha 不同是
+   **正常现象**：远端是自己生成的提交，两边靠 `新 tree` 与 `git rev-parse HEAD^{tree}` 相等来证明一致。
 
    **发版前先探一句 `git ls-remote origin`**，不通就别指望 `publish-release.cjs` 能推上去。
    另一个反复出现的前提：本地 `git config http.proxy` 指着 `127.0.0.1:7890`，而 mihomo 不在时

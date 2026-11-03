@@ -2268,3 +2268,63 @@ App 的列表页才会渲染原生标题「DSH 手机遥控」。判据：`uiaut
   而 README 里写的是 `$OpenSsl enc -d`（变量形式），于是明明写了文档还是红。
   README 里补一行等价字面命令后才绿 —— 这类「文档写了但判据认不出」的假红，和假 PASS 一样费时间。
 
+
+### 25.7 收尾：把这轮改动推上远端（走 API，因为 git 通道还是不通）
+
+本轮改动先提交成两个本地 commit，再推远端。`git push` 依旧
+`Recv failure: Connection was reset` / `Failed to connect to github.com:443`，
+`git ls-remote origin` 也一样 —— 本机到 `github.com:443` 的 git 传输层这轮全程没通，
+只有 `api.github.com` 可用。于是照旧走 `tools/push-via-api.mjs`。
+
+**撞上的新坑（第一次真删/真改名才暴露）：**
+
+只搬「改动文件」的增量模式，在 base_tree 下根本表达不了删除。这轮知识库重编号有
+24 个文件名变了（23 个 rename + 1 个真删），结果：
+
+- 远端 base_tree 里那 24 份旧文件原样留着 → 远端树比本地多 24 个幽灵文件，
+  `新 tree` 必然对不上 `git rev-parse HEAD^{tree}`。
+- 我第一次给删除判定写的是 `git diff --name-only --diff-filter=D`，它**只报出 1 个**
+  （`kb/05-testability.md`，那是真删）。另外 23 个是 rename 的源路径，`--diff-filter=D`
+  同样看不到 —— `--name-only` 对 rename 只吐目标路径。改成
+  `git ls-tree -r --name-only <base>` 减 `HEAD` 清单的差集，24 个才全出来。
+- 而在 base_tree 模式下，删除的唯一写法是
+  `{ path, mode:'100644', type:'blob', sha: null }`。
+- 补删除条目后又冒出第二个错误：这些源路径本来就混在 `changedFiles` 里，循环里
+  第一个就去 `git cat-file blob HEAD:kb/05-testability.md`，
+  直接 `fatal: path 'kb/05-testability.md' does not exist in 'HEAD'`。加一行
+  `if (!ALL && dels.includes(rel)) continue;` 才通。
+
+**还有一个误判陷阱：** 脚本末尾默认会拿 `version.properties` 里的版本号重打 annotated tag。
+`v0.5.0` 早就在远端了，重复 POST 返回 `422 Reference already exists`，
+于是主分支明明 `更新 master -> 200`，脚本仍以非零退出。文档类提交一律加 `--no-tag`。
+
+**base 参数必须是本地存在的提交。** 第一版把远端刚生成的 `e2a638c` 当基线，
+本地对象库里没有它，`git diff e2a638c..HEAD` 报
+`fatal: ambiguous argument 'e2a638c..HEAD': unknown revision`。
+换成它对应的本地提交（`5f654c1`）就对。推完之后**本地与远端 sha 不同是正常现象** ——
+远端那个提交是 API 现场生成的，两边一致靠 tree sha 相等来证明，不是靠 commit sha。
+
+**三次推送的实测记录：**
+
+| 次数 | 基线 | 上传 | 新 tree | 远端 commit | tree 一致性 |
+|---|---|---|---|---|---|
+| 第 1 次 | `659a265` | 34 blob + 24 删除 | `dbb73edb1cc2aa1edf3f21352db4bc5fc64d0766` | `e2a638c` | 一致 ✅ |
+| 第 2 次 | `5f654c1` | 3 blob | `5feb64b6e70b78bf48cdc891cd7ba64b08d7f8d5` | `5ca379b` | 一致 ✅ |
+| 第 3 次 | `33d9c14` | 1 blob | `409411dd7e954a8539284f434fa270891e5e6acb` | `0cb90e3` | 一致 ✅ |
+
+远端 `master` 现在指向 `0cb90e3`，tree `409411dd…` 与本地 `HEAD^{tree}` 逐字节相同
+（用 `api.github.com/repos/Lisa4916/dsh-mobile-app/git/ref/heads/master` 独立复核过一遍）。
+
+**本轮 git 历史：**
+
+```
+0cb90e3 (远端) = 3b87dc5 docs(agents): 补记 API 推送的两个后遗症
+5ca379b (远端) = 33d9c14 fix(tools): 走 API 增量推送时补上删除条目
+e2a638c (远端) = 5f654c1 docs: 三处口径冲突收口 + 三重验收脚本
+                3f0f7ef refactor(kb): 知识库补齐 26 篇，重编号 01-26
+                659a265 docs: 立项书（本轮起点）
+```
+
+**验收终态：** `node tools/verify-delivery.mjs` → **15/15 通过**
+（A4-clone 本轮两次尝试都失败，如实降级为 WARN；A4 改走 GitHub API 取同一份密文，
+三个文件解密后 SHA-256 全部 MATCH）。`git status` 工作树干净。

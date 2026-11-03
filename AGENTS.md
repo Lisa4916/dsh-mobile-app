@@ -74,6 +74,25 @@ dsh.lanPin=<token-lan 的内容>
 
 ---
 
+## 1.1 立项书在哪（第一件事）
+
+新会话接手，**先读 `PROJECT-CHARTER.md`**（~250 行，5 分钟能读完）：
+
+| 想知道 | 看立项书哪一节 |
+|---|---|
+| 这是什么、要解决什么问题 | §1 一句话与问题定义（含用户原话 → 工程目标的对照表） |
+| 哪些事**不做** | §2 非目标（每条都带依据，别推翻） |
+| 为什么「能连」是三件事 | §3 能力边界（找到电脑 / 不需要 PIN / 拿到公网地址，缺一就得人动手） |
+| 做到哪了、下一步做什么 | §4 里程碑（M1–M7 已交付 + B 档按优先级排序） |
+| 「做好了」怎么判 | §5 验收口径（三个可测场景 + 「不许黑屏干等」） |
+| 架构与关键文件 | §6（含分层原则：有判断的地方一律搬出 Activity） |
+| 怎么接手 | §8（三种起法 + 可粘贴交接卡） |
+| 有哪些坑在等着 | §9 风险与依赖（含 GitHub TLS 时通时不通的兜底） |
+
+**本文件（AGENTS.md）是施工手册**：构建命令、源码地图、33 条踩坑。
+**`PROGRESS.md` 是施工日志**：每一步做了什么、验证证据是什么。三者分工别混。
+
+---
 ## 1.5 换个窗口/新会话来接手，怎么让这个项目「认得出来」
 
 DSH 的指令加载规则（`@deepseek-ai/dsh-agent-instructions`）只有两条，记牢就不会串项目：
@@ -86,7 +105,7 @@ DSH 的指令加载规则（`@deepseek-ai/dsh-agent-instructions`）只有两条
 
 | 在其他窗口怎么起 | 结果 |
 |---|---|
-| 新会话把**工作目录设成 `D:\dsh-mobile-app`** | ✅ 只加载本文件，最干净 |
+| 新会话把**工作目录设成 `D:\dsh-mobile-app`** | ✅ 只加载本文件，最干净。想让它在工作区下拉里直接可选，跑一次 `node tools/register-workspace.mjs --apply`（**必须先退出 DSH**，否则运行中的进程会把状态写回覆盖掉） |
 | 在 `D:\DeepSeek Harness` 里开会话，让我「看 dsh-mobile-app」 | 只加载 `D:\DeepSeek Harness\AGENTS.md`（全局路由表），本文件**不会**自动进来 → 必须显式说「读 `D:\dsh-mobile-app\AGENTS.md`」 |
 | 用 `dsh headless "…"` 命令行跑 | ✅ **必须先 `cd` 进去**（`headless` 没有 `--cwd`，工作目录取进程 cwd）；`--json` 输出机器可读事件，`--session-id` 可续跑 |
 | 换一台机器 / 换用户 | 把本目录（或 git clone）放好，再开新会话 |
@@ -101,7 +120,8 @@ DSH 的指令加载规则（`@deepseek-ai/dsh-agent-instructions`）只有两条
 
 ```
 项目：D:\dsh-mobile-app（Android WebView 外壳，包名 com.dsh.remote）
-入口文件：AGENTS.md（构建/路由/踩坑）、PROGRESS.md（步骤与证据）、README.md（对外说明）
+立项书：PROJECT-CHARTER.md（定义/非目标/里程碑/验收口径/风险）
+入口文件：AGENTS.md（构建/源码地图/33 条踩坑）、PROGRESS.md（24 步证据）、README.md（对外说明）
 构建前必须设：JAVA_HOME=D:\AndroidDev\jdk17  ANDROID_HOME=D:\AndroidDev\sdk  ANDROID_SDK_ROOT=D:\AndroidDev\sdk
 gradle：C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat
 基线：tests=235 failures=0；lint 0 error / 22 warning；release APK 1,947,334 B

@@ -1,6 +1,7 @@
 # PROGRESS — dsh-mobile-app 开发日志
 
-> 任务、环境变量、纪律、踩坑清单，全部在 [`AGENTS.md`](D:\dsh-mobile-app\AGENTS.md)。
+> **立项书：[`PROJECT-CHARTER.md`](D:\dsh-mobile-app\PROJECT-CHARTER.md)** —— 定义、非目标、里程碑、验收口径、风险。
+> **施工手册：[`AGENTS.md`](D:\dsh-mobile-app\AGENTS.md)** —— 构建、源码地图、33 条踩坑。
 > 本文件只记「做了什么、验证证据是什么、下一步接哪里」。
 
 ## 换窗口接手（写在这里，免得每次都翻 AGENTS）

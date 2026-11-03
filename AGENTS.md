@@ -89,7 +89,7 @@ dsh.lanPin=<token-lan 的内容>
 | 怎么接手 | §8（三种起法 + 可粘贴交接卡） |
 | 有哪些坑在等着 | §9 风险与依赖（含 GitHub TLS 时通时不通的兜底） |
 
-**本文件（AGENTS.md）是施工手册**：构建命令、源码地图、踩坑清单（§6.1–§6.33，以小节号为准）。
+**本文件（AGENTS.md）是施工手册**：构建命令、源码地图、踩坑清单（§6 起，以小节号为准）。
 **`PROGRESS.md` 是施工日志**：每一步做了什么、验证证据是什么。三者分工别混。
 
 ---
@@ -121,7 +121,7 @@ DSH 的指令加载规则（`@deepseek-ai/dsh-agent-instructions`）只有两条
 ```
 项目：D:\dsh-mobile-app（Android WebView 外壳，包名 com.dsh.remote）
 立项书：PROJECT-CHARTER.md（定义/非目标/里程碑/验收口径/风险）
-入口文件：AGENTS.md（构建/源码地图/踩坑清单 §6.1–§6.33）、PROGRESS.md（24 步证据）、README.md（对外说明）
+入口文件：AGENTS.md（构建/源码地图/踩坑清单 §6）、PROGRESS.md（24 步证据）、README.md（对外说明）
 构建前必须设：JAVA_HOME=D:\AndroidDev\jdk17  ANDROID_HOME=D:\AndroidDev\sdk  ANDROID_SDK_ROOT=D:\AndroidDev\sdk
 gradle：C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat
 基线：tests=235 failures=0；lint 0 error / 22 warning；release APK 1,947,334 B
@@ -342,7 +342,7 @@ adb shell am instrument -w -r -e class com.dsh.remote.PageProbeJsTest \\
 
 ## 6. 踩坑清单（全部已解决，防重犯）
 
-> **编号口径：§6.1–§6.33，以小节号为准。** 本清单只增不改号，引用某条坑时写小节号（如「见 §6.32」），不要写「前 N 条」「共 N 条」——总数会随新增而变，写死就会过期。
+> **编号口径：§6 起，以小节号为准。** 本清单只增不改号，引用某条坑时写小节号（如「见 §6.32」），不要写「前 N 条」「共 N 条」——总数会随新增而变，写死就会过期。
 
 ### 6.1 JVM 单测里 `android.net.Uri` 是 stub
 `Uri.parse` 直接抛 `Stub!`。`Endpoint.kt` 因此改成纯 JDK（`java.net.URI` + 手写规范化），换来可测性。
@@ -1061,6 +1061,91 @@ https：//xxx－yyy。trycloudflare。com/？token=87654321
 
 `:`→`：`、`-`→`－`、`.`→`。`、`?`→`？`，地址直接失效。
 所以**能自动抓就别让人手输**；真要手输，`input text` 之后必须回读 EditText 校验。
+
+### 6.34 公网隧道死域名会把自己锁死：刷新地址必须换一个 base，且要先种 cookie
+
+**用户报的现象**：「公网连接还是存在问题」——列表里那条公网隧道点进去必然
+`net::ERR_NAME_NOT_RESOLVED`，只能去电脑上抄新地址手输。
+
+**先分清不是谁的问题**（一次实测就够，别猜）：
+
+| 层 | 实测 | 结论 |
+|---|---|---|
+| cloudflared / 反代 | `http://127.0.0.1:20241/quicktunnel` 给出 hostname；`GET https://<host>/` 200、首屏是 PIN 页 | 隧道活着 |
+| PIN 门 | `POST /pocket-login` body `username=dsh-pocket&token=…` → 302 + `Set-Cookie: dsh_pocket_token=…` | 通 |
+| 握手 | `GET /?dsh-pocket-auth=1` → 200 + `Set-Cookie: dsh-auth-…` + `x-dsh-pocket-handshake: transition` | 通 |
+| 首页 | 三步 5.46s 走完，`GET /` 200 size=48062 | 通 |
+| 手机 DNS | `ping <当前活隧道>` → 104.16.23x.132；`ping <App 里存的那个>` → `unknown host` | **DNS 没坏，是存的域名已死** |
+
+PC 侧 `Resolve-DnsName` 对 App 存的那个名字返回「DNS 名称不存在」，对当前活的那个
+返回两个 104.16.x。手机 `toybox nc -w 8 <host> 443` 一个通、一个
+`No address associated with hostname`。⇒ **quick tunnel 域名是一次性的，
+隧道一关 DNS 记录就被删，App 存下来的那条必然变成死链接。**
+
+**两个必须一起改的地方**（少改一个就还是连不上）：
+
+1. **base 不能只用「当前页面的 origin」。** 当前页面就是那条死域名时，
+   `pocket.status` 必然 `UnknownHostException`，新地址永远进不来 —— 这就是死锁。
+   改成按顺序试一串候选（`PocketProbe.bases`）：当前 → 已保存的**非易变**入口
+   （局域网/回环/命名隧道，按 `lastUsedAt` 降序）→ `LanScan.localLanIpv4()` 拼出来的那个。
+   quick tunnel 不进候选（试它只是白等 4 秒）。
+2. **每个候选都要先用 `?token=<PIN>` 种 cookie，再问状态。** 只换 base 的版本真机日志是：
+
+```
+pocket.status failed: UnknownHostException                   ← 死域名这条
+pocket.status http 401                                       ← base 挑对了，但没 cookie
+pocket.status: no usable public address (tried 2: …)
+```
+
+   `pocket.status` 裸请求**恒 401**（PC 侧对 `127.0.0.1:3081` 与 `192.168.50.58:3081`
+   都验过）。`HttpURLConnection` 不维护 cookie 罐，`Set-Cookie` 到不了 `CookieManager`，
+   所以必须自己读响应头、筛 `dsh-auth-` 前缀、`setCookie` + `flush`。
+   种 cookie 用 `GET <origin>/?token=<PIN>`（PIN 从档案 URL 的 `?token=` 取，
+   **不要**把 `dsh-pocket-auth` / `dsh-pocket-retry` 当凭据）。
+
+**还要补一条触发路径**：DNS 解析失败时 `onPageFinished` 根本不回调（只有
+`onReceivedError`），而原来「刷新地址」只挂在 `onPageFinished` 上 —— 地址一失效
+这条路自己就断了。所以 `onPageError` 里对 `current?.urlIsVolatile == true` 要显式
+`pocketStatusAsked = false` 再补一次刷新（门禁语义是「一次连接只问一次」，
+这次连接已经失败了）。
+
+**换代后要清旧条目**：`urlIsVolatile`（PUBLIC 且 host 以 `.trycloudflare.com` 结尾）
+就是「会变的域名」标记，新地址到手就把同类的旧条目删掉，否则列表里堆一串死链接。
+但**新地址本身不是 volatile 时（命名隧道）一个都别删** —— 那些可能是用户另留的入口。
+
+**端到端自证（这一步不能省，靠单测证明不了）**：用 debug 包的 `run-as` 直接写
+`shared_prefs/dsh_endpoints.xml`（格式 `id\tlabel\turl\tlastUsedAt\tkind`，多行用
+`&#10;`，`id` = Java `String.hashCode()`），塞「一条死域名 + 一条可达回环」，
+冷启动看日志：
+
+```
+pocket.status seed failed at https://<死域名>: UnknownHostException
+pocket.status failed: UnknownHostException
+pocket.status: seeded 1 cookie(s) at http://127.0.0.1:3081
+pocket.status: answered via http://127.0.0.1:3081
+pocket.status: dropped 1 stale quick tunnel entry(s)
+pocket.status: saved public address <新域名>
+```
+
+杀掉重开之前记得 `adb reverse tcp:3081 tcp:3081`，否则回环那条不可达。
+
+### 6.35 MIUI 上 `adb install` 会静默失败，必须有人点确认
+
+`adb install -r`、`pm install`、`pm install-create/-write/-commit` 三种写法全部返回：
+
+```
+Failure [INSTALL_FAILED_USER_RESTRICTED: Install canceled by user]
+```
+
+`settings put global adb_install_need_confirm 0`、`install_non_market_apps 1`、
+`verifier_verify_adb_installs 0` 三个都关掉**仍然被拦**。真相是 MIUI 会拉起
+`com.miui.securitycenter/com.miui.permcenter.install.AdbInstallActivity` 等人点。
+
+**可用姿势**：后台 job 发起 install，同时抓
+`dumpsys activity activities | Select-String topResumedActivity` 确认弹窗出现，
+等 ~9 秒后 job 自己返回 `Performing Streamed Install / Success`。
+装完**必须**用 `dumpsys package com.dsh.remote | Select-String lastUpdateTime`
+核对时间戳——脚本报 Success 也可能是把旧包又装了一遍。
 
 ---
 

@@ -18,7 +18,7 @@
 | 接手方式（含可粘贴交接卡） | §8 |
 | 风险与依赖 | §9 |
 
-`AGENTS.md` 是**施工手册**（构建、源码地图、踩坑清单 §6.1–§6.33）；`PROGRESS.md` 是**施工日志**（每步做了什么、证据是什么）。
+`AGENTS.md` 是**施工手册**（构建、源码地图、踩坑清单 §6）；`PROGRESS.md` 是**施工日志**（每步做了什么、证据是什么）。
 
 ---
 ## 在别的窗口 / 新会话接手这个项目
@@ -132,7 +132,8 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'; $env:ANDROID_HOME='D:\AndroidDev\sdk'; $en
 | `AutoFailoverTest` | 14 | `pickStart` 没 Wi-Fi 时把 LAN 换成 PUBLIC；`next` 优先换网络类型、已试过的不重试 |
 | `ConnectWatchdogTest` | 15 | 8 秒无进度 / 30 秒硬上限；**`hopeless`：没 Wi-Fi 连私有网段立刻判死，公网慢也要等** |
 | `PocketStatusTest` | 17 | **剥 RPC 信封 `result.value`**（夹具是真机原始响应）、嵌套同名键不能冒充顶层、隧道停则不产出地址 |
-| **合计** | **235** | |
+| `PocketProbeTest` | 24 | **刷新公网地址该拿哪个 base**：当前页优先、死域名回退到局域网/回环、每个候选都带 PIN（漏了恒 401）、易变域名不进候选、换代时只清同类旧条目 |
+| **合计** | **259** | |
 
 **真机 instrumented**：`androidTest/PageProbeJsTest` 7 条，验取值链路在真 WebView 里的行为
 （中文标题含 `·` 往返、`innerText` 跳过 `display:none`、`about:blank` 不崩）。
@@ -519,8 +520,8 @@ Remove-Item $Tmp -Recurse -Force
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | `tests=235 failures=0 errors=0 skipped=0`（15 个测试类） |
-| APK | `app-debug.apk` 7,312,868 B / `app-release.apk` **1,947,334 B**（0.4.0 发版产物 1,930,950 B） |
+| 单元测试 | `tests=259 failures=0 errors=0 skipped=0`（16 个测试类） |
+| APK | `app-debug.apk` 7,415,315 B / `app-release.apk` **1,947,334 B**（0.4.0 发版产物 1,930,950 B） |
 | 装完直进 | release 包全新安装清数据后冷启动 `TotalTime: 313`，直接落 DSH 主界面，无 PIN 屏（`build-artifacts/v05-rel-first.png`） |
 | **只走 4G** | **关 Wi-Fi（只剩 `ccmni1 10.66.64.247/8`）冷启动 `TotalTime: 286`，`pocket.status: saved public address …trycloudflare.com` 后直进主界面** |
 | Release | `v0.4.0` 已发布，固定地址 `200` / 1,930,950 B，SHA-256 `8d791d29…68abd`，与 `SHA256SUMS.txt` 一致 |
@@ -534,6 +535,7 @@ Remove-Item $Tmp -Recurse -Force
 | 键盘弹出 | 帧间隔中位数 11ms，全程 177ms，单调无回弹 |
 | 键盘收起 | rootH 574→895，composerTop 324→484，逐帧 |
 | **三重验收** | `node tools\verify-delivery.mjs` → **14/14 通过**：签名备份 clone→解密→三文件 SHA-256 全 MATCH；知识库 DB 26/26/26 全 ready 且与 `kb/` 26 篇一一对应（0 个 DB-only、0 个孤立源）；三份文档口径无矛盾 |
+| **隧道换名自愈** | 真机注入「死域名 `integrated-idaho-feat-sherman.trycloudflare.com` + 本机回环 `127.0.0.1:3081`」冷启动：`seed failed`（死域名）→ `seeded 1 cookie(s) at http://127.0.0.1:3081` → `answered via http://127.0.0.1:3081` → `dropped 1 stale quick tunnel entry(s)` → `saved public address vector-silicon-brisbane-output.trycloudflare.com`；prefs 里死条目已被替换（`8PCE7LJB99VG7TRO`，Android 15） |
 
 ## 调试工具链（`tools/`）
 

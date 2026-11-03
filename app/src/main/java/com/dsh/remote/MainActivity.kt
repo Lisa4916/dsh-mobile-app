@@ -1002,43 +1002,129 @@ class MainActivity : AppCompatActivity() {
      * 三条约束：
      * 1. **一次连接只问一次**（[pocketStatusAsked]），页面每次路由跳转都会 `onPageFinished`，
      *    不做门禁会变成刷屏式请求；
-     * 2. 解析与取舍全在 [PocketStatus] 里（纯 JVM、有单测），这里只负责发请求与落库；
+     * 2. 解析与取舍全在 [PocketStatus] 里（纯 JVM、有单测），候选 base 的挑选在
+     *    [PocketProbe] 里（同样是纯 JVM、有单测），这里只负责发请求与落库；
      * 3. 拿不到就安静地什么都不做 —— 这只是「多一条更好用的地址」，失败不该打扰用户。
+     *
+     * ## 为什么要一串 base 而不是一个（2026-11-03 事故）
+     *
+     * quick tunnel 的域名每次重开电脑都会变。这条限制本身没法在手机上绕过，但有个后果
+     * 原来没处理：手机里存的那条公网档案会变成**死域名**（实测 DNS 直接不存在），
+     * 于是 `current.url` 的 origin 也是死的 —— 以它为 base 问 `pocket.status` 必然
+     * `UnknownHostException`，新地址永远进不来，用户只能去电脑上抄地址手输。
+     *
+     * 现在按 [PocketProbe.bases] 的顺序逐个试：当前页面 → 已保存的局域网档案 →
+     * 本机 Wi-Fi 地址拼出来的那个。人还在电脑同一个 Wi-Fi 下时，第二条/第三条能问出结果，
+     * 死域名就被自动换掉了。
+     *
+     * ## 而且每个候选都要先把 cookie 种下去（同一个事故的第二层）
+     *
+     * 第一版多候选上线后，真机日志是：
+     *
+     * ```
+     * pocket.status failed: UnknownHostException      ← 第一条：死域名
+     * pocket.status http 401                           ← 第二条：base 挑对了，但没 cookie
+     * pocket.status: no usable public address (tried 2: …)
+     * ```
+     *
+     * 原因是页面从没在回退 base 那个 origin 上加载过，`CookieManager` 里自然没有它的
+     * `dsh-auth-*`，而 `pocket.status` 裸请求恒 401（PC 侧实测）。所以每个候选先用
+     * `GET <origin>/?token=<PIN>` 把 cookie 种进去 —— dsh-pocket 看到 `?token=` 才下发
+     * `Set-Cookie: dsh-auth-*`（实测 `GET http://127.0.0.1:3081/` 的响应头里就有）。
      */
     private fun maybeCapturePublicAddress() {
         if (pocketStatusAsked) return
         pocketStatusAsked = true
         val from = current ?: return
-        val base = originOf(from.url) ?: return
+        val probes = PocketProbe.bases(from, connections.all(), LanScan.localLanIpv4())
+        if (probes.isEmpty()) return
         Thread({
-            val body = postPocketStatus(base)
-            val endpoint = PocketStatus.publicEndpoint(body, System.currentTimeMillis())
+            val endpoint = probes.asSequence()
+                .mapNotNull { probe ->
+                    seedAuthCookie(probe)
+                    val body = postPocketStatus(probe.origin)
+                    val got = PocketStatus.publicEndpoint(body, System.currentTimeMillis())
+                    if (got != null) {
+                        android.util.Log.i("DshRemote", "pocket.status: answered via ${probe.origin}")
+                    }
+                    got
+                }
+                .firstOrNull()
             if (endpoint == null) {
-                android.util.Log.i("DshRemote", "pocket.status: no usable public address")
+                android.util.Log.i(
+                    "DshRemote",
+                    "pocket.status: no usable public address (tried ${probes.size}: ${probes.joinToString { it.origin }})",
+                )
                 return@Thread
             }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                val existed = connections.all().any { it.id == endpoint.id }
+                val before = store.all()
+                val existed = before.any { it.id == endpoint.id }
+                // 同一次写里把已经失效的 quick tunnel 条目清掉：它们是死链接，
+                // 留着只会让用户点了等一轮 8 秒超时。
+                val stale = PocketProbe.staleVolatileIds(before, endpoint)
+                store.upsert(endpoint)
+                if (stale.isNotEmpty()) {
+                    stale.forEach { store.remove(it) }
+                    android.util.Log.i("DshRemote", "pocket.status: dropped ${stale.size} stale quick tunnel entry(s)")
+                }
                 // 存进去但不动 lastUsedAt：用户这次连的是局域网，不该让下次冷启动
                 // 突然改成走公网（公网多一跳、更慢，而且隧道地址会变）。
-                store.upsert(endpoint)
+                if (!existed || stale.isNotEmpty()) applyList(store.all())
                 if (!existed) {
-                    applyList(store.all())
                     android.util.Log.i("DshRemote", "pocket.status: saved public address ${endpoint.host}")
                 }
             }
         }, "dsh-pocket-status").start()
     }
 
-    /** `https://a.b:8443/x?y` → `https://a.b:8443`；解析不出就 null。 */
-    private fun originOf(url: String?): String? {
-        if (url == null) return null
-        if (Endpoint.parseUri(url) == null) return null
-        val host = Endpoint.hostOf(url) ?: return null
-        val scheme = LanScan.schemeOf(url)
-        val port = LanScan.portOf(url)
-        return if (port == null) "$scheme://$host" else "$scheme://$host:$port"
+    /**
+     * 先在某条候选入口上把 `dsh-auth-*` cookie 种进 [CookieManager]，再让
+     * [postPocketStatus] 带着它去问状态。
+     *
+     * 为什么必须自己解析 `Set-Cookie`：`HttpURLConnection` 不会替你维护 cookie 罐
+     * （那是 OkHttp / WebView 的事），dsh-pocket 下发的 `Set-Cookie` 到不了
+     * `CookieManager`，于是下一步 POST 依旧 401。这里读完响应头手动写进去。
+     *
+     * 失败一律静默：种不上就交给下一步的 401 兜着，这不是致命路径。
+     */
+    private fun seedAuthCookie(probe: PocketProbe.Probe) {
+        if (probe.pin == null) return // 没有 PIN 就只能指望已有 cookie
+        var conn: java.net.HttpURLConnection? = null
+        try {
+            val cm = CookieManager.getInstance()
+            val opened = java.net.URL(probe.seedUrl).openConnection() as java.net.HttpURLConnection
+            conn = opened
+            opened.requestMethod = "GET"
+            opened.connectTimeout = 4_000
+            opened.readTimeout = 4_000
+            opened.instanceFollowRedirects = false
+            cm.getCookie(probe.origin)?.takeIf { it.isNotEmpty() }?.let { opened.setRequestProperty("Cookie", it) }
+            // 读完就丢：这里只要响应头里的 Set-Cookie，body 是过渡页或首页，没有用处。
+            opened.inputStream?.close()
+            val raw = opened.headerFields
+                ?.filterKeys { it?.equals("Set-Cookie", ignoreCase = true) == true }
+                ?.values
+                ?.flatten()
+                .orEmpty()
+            var seeded = 0
+            raw.forEach { line ->
+                val pair = line.substringBefore(';').trim()
+                if (pair.startsWith(CookieNames.AUTH_PREFIX)) {
+                    cm.setCookie(probe.origin, pair)
+                    seeded++
+                }
+            }
+            if (seeded > 0) {
+                cm.flush()
+                android.util.Log.i("DshRemote", "pocket.status: seeded $seeded cookie(s) at ${probe.origin}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.i("DshRemote", "pocket.status seed failed at ${probe.origin}: ${e.javaClass.simpleName}")
+        } finally {
+            conn?.disconnect()
+        }
     }
 
     /**
@@ -1165,6 +1251,17 @@ class MainActivity : AppCompatActivity() {
         progress.visibility = View.GONE
         android.util.Log.w("DshRemote", "main frame error $code: $description")
         toast("连接失败（$code）：${description ?: "未知原因"}")
+        // 当前这条是「会变的公网隧道地址」时，顺手重问一次状态 RPC，把新地址换进来。
+        //
+        // 为什么必须放在这里：`onPageFinished` 在 DNS 解析失败时根本不会回调（实测死域名
+        // 只有 `net::ERR_NAME_NOT_RESOLVED` + `onReceivedError`），所以原来只有「页面能
+        // 打开」这一条路才会刷新公网地址 —— 而地址失效之后，那条路自己就断了。
+        // 门禁要显式清零：一次连接只问一次的语义是按「一次连接」算的，这次连接已经失败，
+        // 该重新允许问。
+        if (current?.urlIsVolatile == true) {
+            pocketStatusAsked = false
+            maybeCapturePublicAddress()
+        }
         // 顺序有讲究：先离开错误页，再切回列表。反过来会让空白页在可见状态下闪一下。
         webView.loadUrl(BLANK_PAGE)
         showList()

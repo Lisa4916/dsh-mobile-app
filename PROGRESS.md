@@ -2343,3 +2343,100 @@ e2a638c (远端) = 5f654c1 docs: 三处口径冲突收口 + 三重验收脚本
 
 `git diff 659a265..HEAD --name-only | grep '\.kt$'` 为空 —— 本轮没动 Kotlin 源码，
 单测基线 `235/0/0` 是原样保住的，不是靠改测试凑出来的。
+
+---
+
+## 第 26 步：公网隧道换名后自己接回来（`pocket.status` 换 base + 种 cookie）✅
+
+用户报的现象：**「公网连接还是存在问题」**。列表里那条公网隧道点进去必然
+`net::ERR_NAME_NOT_RESOLVED`，只能去电脑上抄一遍当前地址手输。
+
+### 26.1 先把「不是谁的问题」钉死
+
+服务端整条链路一次实测全通（细节见 `AGENTS.md` §6.34）：cloudflared quick tunnel
+给出 `vector-silicon-brisbane-output.trycloudflare.com`、`GET /` 200 且首屏是 PIN 页、
+`POST /pocket-login` 302 + `Set-Cookie: dsh_pocket_token=…`、
+`GET /?dsh-pocket-auth=1` 200 + `Set-Cookie: dsh-auth-…` + `x-dsh-pocket-handshake: transition`、
+三步合计 5.46s、首页 48062 字节。
+
+手机侧 DNS 也没坏：对**当前活隧道** `ping`/`nc` 都通，对 **App 里存的那个域名**
+`ping` 报 `unknown host`、`nc` 报 `No address associated with hostname`。
+PC 侧 `Resolve-DnsName` 对后者直接「DNS 名称不存在」。
+
+⇒ 根因：**quick tunnel 域名是一次性的，隧道一关 DNS 记录就删**，
+App 把上一次的域名持久化进 `dsh_endpoints`，那条必然变成死链接。
+
+### 26.2 死锁是怎么形成的
+
+`maybeCapturePublicAddress()` 原来只拿 `current.url` 的 origin 当 base 去问
+`pocket.status`。当前页面就是那条死域名时：
+
+- WebView 先报 `net::ERR_NAME_NOT_RESOLVED`；
+- 同一个 origin 上的 `pocket.status` 必然 `UnknownHostException`；
+- 于是「刷新地址」这根救命绳自己断在半空 —— 新地址永远进不来。
+
+反向验证：把可达地址手输进去（或连上局域网）时，同一函数成功并打印
+`pocket.status: saved public address vector-silicon-brisbane-output.trycloudflare.com`，
+说明刷新逻辑本身没坏，坏的只是**入口选错了**。
+
+### 26.3 改了两个地方（少一个都不行）
+
+**一、base 换成候选串**（新增 `PocketProbe.kt`，纯 JVM）：
+当前页面 origin → 已保存的**非易变**入口（局域网/回环/命名隧道，按 `lastUsedAt` 降序）
+→ `LanScan.localLanIpv4()` 拼出来的那个。quick tunnel 不进候选（试它只是白等 4 秒）。
+
+**二、每个候选先用 `?token=<PIN>` 种 cookie 再问状态**。只做第一步时真机日志是：
+
+```
+pocket.status failed: UnknownHostException
+pocket.status http 401                 ← base 挑对了，但这 origin 没有 cookie
+pocket.status: no usable public address (tried 2: …)
+```
+
+`pocket.status` 裸请求恒 401（PC 侧对 `127.0.0.1:3081` 与 `192.168.50.58:3081` 都验过），
+而 `HttpURLConnection` 不维护 cookie 罐，`Set-Cookie` 到不了 `CookieManager` ——
+所以 `seedAuthCookie()` 自己读响应头、筛 `dsh-auth-` 前缀、`setCookie` + `flush`。
+
+**三、补一条触发路径**：DNS 解析失败时 `onPageFinished` 根本不回调（只有
+`onReceivedError`），而刷新只挂在 `onPageFinished` 上。所以 `onPageError` 里对
+`current?.urlIsVolatile == true` 显式 `pocketStatusAsked = false` 再补一次。
+
+**四、换代后清旧条目**：新地址到手就删掉同类 `urlIsVolatile` 旧条目；
+但新地址本身不是 volatile 时（命名隧道）一个都不删。
+
+### 26.4 端到端自证（单测证明不了这一步）
+
+debug 包用 `run-as` 直接写 `shared_prefs/dsh_endpoints.xml`，塞「一条死域名 + 一条可达回环」，
+`adb reverse tcp:3081 tcp:3081` 后冷启动，日志完整闭环：
+
+```
+11-03 13:58:08.563 W DshRemote: main frame error -2: net::ERR_NAME_NOT_RESOLVED
+11-03 13:58:08.586 I DshRemote: pocket.status seed failed at https://integrated-idaho-feat-sherman.trycloudflare.com: UnknownHostException
+11-03 13:58:08.591 I DshRemote: pocket.status failed: UnknownHostException
+11-03 13:58:08.608 I DshRemote: pocket.status: seeded 1 cookie(s) at http://127.0.0.1:3081
+11-03 13:58:08.691 I DshRemote: pocket.status: answered via http://127.0.0.1:3081
+11-03 13:58:08.692 I DshRemote: pocket.status: dropped 1 stale quick tunnel entry(s)
+11-03 13:58:08.698 I DshRemote: pocket.status: saved public address vector-silicon-brisbane-output.trycloudflare.com
+```
+
+prefs 事后核对：死域名条目消失，换成 `https://vector-silicon-brisbane-output.trycloudflare.com/?token=75330002`
+（`lastUsedAt=0`，因为这次连的是回环，不该让下次冷启动改走公网）。
+`uiautomator dump` 只剩「127.0.0.1（本机）」与「公网隧道（公网，vector-…）」两条。
+
+### 26.5 回归
+
+| 命令 | 结果 |
+|---|---|
+| `gradle :app:testDebugUnitTest --rerun-tasks` | **tests=259 failures=0 errors=0 skipped=0**（16 个测试类；基线 235 → 259，新增 `PocketProbeTest` 24 条） |
+| `gradle :app:assembleDebug` | BUILD SUCCESSFUL，`app-debug.apk` 7,415,315 B |
+| 编译告警 | 仍是基线那 4 条（`PocketStatus.kt:187` 恒真、`ScanActivity.kt:108/113` 废弃、`WebViewFactory.kt:33` 废弃），无新增 |
+
+### 26.6 本轮踩到的两个仪器坑
+
+- **MIUI 会静默拦 `adb install`**：三种写法全 `INSTALL_FAILED_USER_RESTRICTED`，
+  三个 `settings` 开关都关掉仍被拦；真正拦它的是 `AdbInstallActivity` 弹窗等人点。
+  可行姿势是后台 job 发起 install + 同时抓 `topResumedActivity`，
+  装完**必须**用 `dumpsys package … lastUpdateTime` 核对时间戳（脚本报 Success 也可能是旧包）。
+- **`adb shell input tap` 在这台机器上被拒**（`InputManager: Input event injection from pid N failed`），
+  `monkey -f` 的 `Tap()` 这次也返回 `// Injection Failed`。所以验证走
+  `run-as` 写 prefs + 冷启动看日志，不依赖点击。

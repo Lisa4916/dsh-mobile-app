@@ -1,10 +1,5 @@
----
-title: 本地敏感数据的存放边界：token、备份与「界面文案不能撒谎」
-type: decision
-tags: 安全,存储,allowbackup,token,dataextractionrules,隐私
-confidence: 0.9
-group: 架构
----
+# 本地敏感数据的存放边界：token、备份与「界面文案不能撒谎」
+
 手机 App 里最常出现的自我欺骗是：**界面文案写着「不保存任何密钥」，而 `shared_prefs` 里明文躺着口令**。写文案的人未必在撒谎，多半是写文案的时候确实没存，后来为了可用性加了持久化，文案没人回头改。
 
 ## 一、先把「存了没有」查清楚

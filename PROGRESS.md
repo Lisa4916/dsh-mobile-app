@@ -2150,3 +2150,121 @@ App 的列表页才会渲染原生标题「DSH 手机遥控」。判据：`uiaut
 （之前几次走 API 推送造成的）。`git rev-parse origin/master^{tree}` 与本地 `3beb5ce^{tree}` 都是
 `1e9c7630…`，确认树一致后 `git reset --soft origin/master` 再重放提交，得到 `29e70da`，
 推送 `8a30788..29e70da` 成功。**以后遇到 push 被拒先比 tree，不要急着 pull 生成无意义的合并提交。**
+
+---
+
+## 第 25 步：三处口径冲突收口（签名备份 / 知识库 26 篇 / 踩坑编号）✅
+
+这一步不加功能，只把「文档说的」和「磁盘上的」对齐。起因是重新接手时做的一次盘点发现三处对不上，
+其中第一处是真正的风险（不是笔误）。
+
+### 25.1 三处冲突的实测结论
+
+| # | 冲突 | 盘点时的说法 | 实测 |
+|---|---|---|---|
+| 1 | 签名材料备份 | `release/` 里有明文 `password.txt` | **不是泄漏**，是**没备份**：`.gitignore:23` 整目录忽略 `release/`，`git check-ignore -v` 三个文件全 IGNORED，`git log --all -- release/` 零提交。但换机器就没了 |
+| 2 | 知识库篇数 | 立项书/AGENTS 写 26 篇，`kb/` 只有 24 个 md，PROGRESS 第 15 步写 25 篇 | `kb-verify` 报 entries=26 documents=26 passage=26 —— **26 是对的**，`kb/` 少的是源文件（DB 有 3 篇没有源、`kb/updates/` 有 19 个草稿没并进顶层、还有 1 篇同题旧版） |
+| 3 | 踩坑条数 | 「33 条踩坑」写在三个文件里 | 条数本身没错（§6.1–§6.33 连续），但**写死总数这个做法是错的** —— 下次加一条就全线过期 |
+
+### 25.2 签名材料：加密后进私有仓
+
+做法与理由：`dsh-mobile-app` 保持 **public**（Release 走公开直链，手机不用登录就能更新），
+签名材料单独放私有仓 `Lisa4916/dsh-mobile-app-secrets`，**仓里只有密文**。
+
+```
+明文 release/dsh-remote.jks (4,384 B)      → enc/dsh-remote.jks.enc        (4,416 B)
+明文 release/keystore.b64   (5,848 B)      → enc/keystore.b64.enc          (5,872 B)
+明文 release/password.txt   (24 B)         → enc/KEYSTORE_PASSWORD.txt.enc (48 B)
+```
+
+加密命令（Git for Windows 自带 openssl，不在 PATH 里）：
+
+```powershell
+& 'C:\Program Files\Git\usr\bin\openssl.exe' enc -aes-256-cbc -pbkdf2 -iter 200000 -salt `
+    -in <明文> -out <密文>.enc -pass "pass:<口令>"
+```
+
+口令是 24 字节随机数的 base64（32 字符），**只存在本机** `build-artifacts/secrets-backup-out/BACKUP-PASSPHRASE.txt`，
+该路径被 `.gitignore` 的 `build-artifacts/` 覆盖。加密后立刻解密回读，三个 SHA-256 全部 MATCH 才继续。
+
+**推送踩了三个坑**（`github.com:443` 的 git 传输层当时通了，但第一次还是失败）：
+
+1. `git push` 到空仓库报 `Recv failure: Connection was reset`；后来 clone 又变成 `Could not connect to server`。
+   → 说明这条网络**时通时不通**，不能把「能 push」当成前提。
+2. 改用 GitHub Data API（沿用 `tools/push-via-api.mjs` 的思路，新写 `build-artifacts/push-secrets-via-api.mjs`）：
+   空仓库 `POST /git/blobs` 直接 **409 `Git Repository is empty.`** —— Git Data API 在空仓库上不可用。
+   → 必须先用 contents API `PUT /repos/{o}/{r}/contents/README.md` 建出首个提交，之后才能玩 tree/commit。
+3. 之后 `POST /git/refs` 报 **422 `Reference already exists`**。
+   → 改成 `GET /git/ref/heads/main` 拿 parent，再 `PATCH /git/refs/heads/main`（`force: true`）。
+
+最终远端 main：commit `d2080c1`（parent `13d862a`）、tree `96bf42ab…`，四个 blob 与本地密文逐字节一致。
+
+### 25.3 知识库：以 DB 为事实来源，源文件补齐到 26
+
+原则定下来：**DB 是事实来源，`kb/` 是给人看的镜像**。因为 `kb-verify` 读的是 DB，
+`knowledge_search` 命中的也是 DB，磁盘 md 只是投影。
+
+- 从 DB 导出 3 篇「有库无源」的正文，补成源文件（slug 手工定，纯中文标题自动 slug 会难读）：
+  `51d10dff → 13-keyboard-permission.md`、`087d0799 → 16-wireless-adb.md`、`18580ac9 → 26-agent-skills-eval.md`
+- `kb/updates/` 19 个草稿**并入顶层后整目录删除**。理由是暂存区与正式目录存在同名两份，
+  谁新谁旧全靠人记 —— 历史上真的分叉过：`04-adb-cdp` 两处各一版，差 60 行。
+- 同题旧版 `04-adb-cdp-debug.md` → `kb/archive/`（用 `git mv` 保留历史，不 `rm` 再 `add`）。
+- 重编号到 **01–26 连续**，按组排：构建(01-03) / 外壳(04-12) / 键盘(13-14) / 调试(15-17) / 测试(18-22) / 架构(23-25) / 参考资料(26)。
+
+最终 26 个：`01-android-version-cadence` `02-r8-and-release` `03-build-env` `04-android16-edge-to-edge-predictive-back`
+`05-webview-shell` `06-webview-security-baseline` `07-handshake-gate` `08-login-state` `09-startup-sidebar-flash`
+`10-render-process-gone` `11-home-return` `12-back-layering` `13-keyboard-permission` `14-keyboard-insets`
+`15-adb-cdp` `16-wireless-adb` `17-click-injection` `18-regression` `19-testability` `20-performance-verification`
+`21-test-layering` `22-page-probe` `23-integration-contract` `24-local-secret-storage` `25-architecture-layering` `26-agent-skills-eval`。
+
+**两个工具跟着改**（不改就是埋雷）：
+
+- `tools/kb-ingest.mjs`：`META` 表原来只列 5 个旧文件名，重编号后全部对不上。
+  改成 26 条（内容从 DB 导出，不是手写），并加一道**前置校验**：`kb/*.md` 与 `META` 键集合不一致就抛错并列出差集。
+  以前它是「静默少灌几篇」，现在是「明确失败」。
+- `tools/kb-update.mjs`：`UPDIR='kb/updates'` 已经不存在，脚本等于废了。
+  重写成扫 `kb/*.md` 本身：有 front-matter 用它、没有就用一级标题在库里精确匹配；
+  **正文与库里一字不差的直接跳过**（不会白涨版本号）；新建必须带 front-matter（不猜元数据）。
+
+改完后 `node tools/kb-update.mjs --dry` 输出 26 行「跳过 ... 正文无变化」 —— 这是**正确**结果，
+说明 `kb/` 与 DB 已经逐篇一致，再跑一次也不会产生假版本。
+
+### 25.4 踩坑编号：只写小节号，不写总数
+
+`AGENTS.md:343`（§6 开头）加一条引用块，把口径钉死：
+
+> **编号口径：§6.1–§6.33，以小节号为准。** 本清单只增不改号，引用某条坑时写小节号（如「见 §6.32」），
+> 不要写「前 N 条」「共 N 条」——总数会随新增而变，写死就会过期。
+
+然后清掉全部「33 条踩坑」字样：`AGENTS.md:92`、`AGENTS.md:124`、`PROJECT-CHARTER.md:135`、`README.md:21`。
+
+### 25.5 验收：三重，可重复跑
+
+新写 `tools/verify-delivery.mjs`（**只读**，退出码 0/1，`node tools/verify-delivery.mjs` 随时复核）：
+
+| 组 | 检查 | 方法 |
+|---|---|---|
+| A1–A3 | 远端四个文件齐全、无口令字面量 | GitHub API 读 tree + 逐个 blob 与本地口令做比对 |
+| A4 | **clone → 解密 → SHA 逐字节相同** | `git clone` 私有仓 → `openssl enc -d` → 三文件 SHA-256 对比硬编码期望值 |
+| B1–B3b | DB 26/26/26 全 ready、`kb/` 26 篇精确对应（0 个 DB-only、0 个孤立源）、编号连续、`updates/` 已消失 | 读 DB + 扫 `kb/`，标题 norm 后**精确相等**（用 `includes` 会把「返回导航」误配到别的篇，造成假 PASS） |
+| C | 三份文档无「33 条踩坑」、无 25/26 篇矛盾、AGENTS 声明了「以小节号为准」、README 含备份仓地址与 `openssl enc -d` | 正则扫文本 |
+
+最后一次运行：**14/14 通过，三重验收全绿**（A4 用的是 `git clone` 路径，不是 API 兜底 —— 说明恢复流程第一段当时是成立的）。
+
+### 25.6 脚本自己踩的坑（写进这里免得重犯）
+
+- **`includes` 匹配造出假 PASS**：B2 第一版用双向 `includes`，把「返回导航」错配到别的篇还显示通过。
+  判据必须 norm 后精确相等，再加一条反向核对（每个源都能对上 DB 标题）。
+- **H1 不一定存在**：`kb/updates/*.md` 是 front-matter + 正文，**正文里没有一级标题**。
+  取标题要优先读 front-matter 的 `title:`，回退 H1。
+- **`git credential fill` 会被环境变量毒住**：给 clone 设的 `GIT_TERMINAL_PROMPT=0` / `GCM_INTERACTIVE=never`
+  会让同一进程里取 PAT 直接报 `fatal: Cannot prompt because user interactivity has been disabled`。
+  取 token 前先把这几个变量 delete 掉。
+- **`api.github.com` 会偶发 `UND_ERR_SOCKET: other side closed`**（`remoteAddress 20.205.243.168:443`）。
+  `api()` 必须带退避重试，否则一次抖动就让整轮验收红。
+- **别在脚本里裸奔 clone**：有一次弹出了 GitHub 凭据管理器的 GUI 登录窗，把 pwsh 作业挂死（只能 kill）。
+  凡是脚本里跑 git，一律带 `GIT_TERMINAL_PROMPT=0 GCM_INTERACTIVE=never`。
+- **verify 脚本的判据不要写成「我实现的东西的名字」**：C5 第一版找字面 `openssl enc -d`，
+  而 README 里写的是 `$OpenSsl enc -d`（变量形式），于是明明写了文档还是红。
+  README 里补一行等价字面命令后才绿 —— 这类「文档写了但判据认不出」的假红，和假 PASS 一样费时间。
+

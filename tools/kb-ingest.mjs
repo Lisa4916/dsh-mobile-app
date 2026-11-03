@@ -1,6 +1,6 @@
 // 把 D:\dsh-mobile-app\kb\*.md 灌入「手机软件开发知识库」，完全走插件自己的渲染与哈希函数
 // 运行： node kb-ingest.mjs [--dry]
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -26,12 +26,37 @@ const slugify = value => value.normalize('NFKC').trim()
 const nowIso = () => new Date().toISOString();
 
 // 每篇的元数据：type / tags / group / confidence
+// 这张表必须与 kb/ 顶层 26 个文件一一对应（键就是文件名）。改过名或加过篇就要跟着改，
+// 否则下面 for (const file of Object.keys(META)) 会直接 ENOENT。
+// 事实来源是 DB 里的 knowledge_entries：这里是从库里导出来的快照。
+// 导出命令见 AGENTS §8；要重新导出就先跑 build-artifacts/gen-meta.mjs 那类小脚本。
 const META = {
-  '01-build-env.md':      { type: 'procedure', tags: ['android', 'gradle', 'agp', 'jdk', '构建', '环境'], group: '构建', confidence: 0.85 },
-  '02-webview-shell.md':  { type: 'procedure', tags: ['android', 'webview', 'kotlin', '外壳', 'jsbridge'], group: '外壳', confidence: 0.85 },
-  '03-keyboard-insets.md':{ type: 'lesson',    tags: ['android', 'windowinsets', 'webview', '键盘', '动画', '实测'], group: '键盘', confidence: 0.9 },
-  '04-adb-cdp-debug.md':  { type: 'procedure', tags: ['adb', 'cdp', '调试', 'android', '真机'], group: '调试', confidence: 0.85 },
-  '05-testability.md':    { type: 'decision',  tags: ['android', 'junit', '测试', '可测性', 'kotlin'], group: '测试', confidence: 0.85 },
+  '01-android-version-cadence.md':                 { type: 'fact', tags: ['android', 'api level', 'google play', 'targetsdk', '版本兼容'], group: '构建', confidence: 0.95 },
+  '02-r8-and-release.md':                          { type: 'procedure', tags: ['minify', 'proguard', 'r8', 'release', '发布', '签名'], group: '构建', confidence: 0.93 },
+  '03-build-env.md':                               { type: 'procedure', tags: ['adb', 'agp', 'android', 'gradle', 'jdk', 'kotlin', 'webview', 'windowinsets', 'windows', '临时目录', '工具链', '构建', '构建环境', '环境', '调试'], group: '构建', confidence: 0.85 },
+  '04-android16-edge-to-edge-predictive-back.md':  { type: 'procedure', tags: ['android 16', 'edge-to-edge', 'predictive back', 'targetsdk 36', 'webview', 'windowinsets'], group: '外壳', confidence: 0.95 },
+  '05-webview-shell.md':                           { type: 'procedure', tags: ['adb', 'android', 'cookie', 'document-start', 'dsh-pocket', 'gradle', 'javascript', 'jsbridge', 'kotlin', 'onbackpresseddispatcher', 'spa', 'webview', 'windowinsets', '启动锁', '外壳', '微注入', '登录态', '调试', '返回导航'], group: '外壳', confidence: 0.85 },
+  '06-webview-security-baseline.md':               { type: 'procedure', tags: ['javascriptinterface', 'shouldoverrideurlloading', 'webview', '安全', '安全基线'], group: '外壳', confidence: 0.95 },
+  '07-handshake-gate.md':                          { type: 'lesson', tags: ['android', 'cookie', 'webview', 'webview外壳', '实测', '自愈', '退避', '重建'], group: '外壳', confidence: 0.95 },
+  '08-login-state.md':                             { type: 'lesson', tags: ['android', 'cookie', 'webview', 'webview外壳', '实测', '端口', '自愈'], group: '外壳', confidence: 0.92 },
+  '09-startup-sidebar-flash.md':                   { type: 'lesson', tags: ['cdp', 'css', 'transition', 'webview', '启动', '实测', '闪烁'], group: '外壳', confidence: 0.93 },
+  '10-render-process-gone.md':                     { type: 'procedure', tags: ['onrenderprocessgone', 'webview', '内存', '稳定性', '闪退'], group: '外壳', confidence: 0.95 },
+  '11-home-return.md':                             { type: 'lesson', tags: ['android', 'dom', 'webview', 'webview外壳', '侧栏', '实测', '踩坑', '返回导航'], group: '外壳', confidence: 0.95 },
+  '12-back-layering.md':                           { type: 'procedure', tags: ['dom判据', 'spa', 'webview', '一次只退一层', '层级', '返回键'], group: '外壳', confidence: 0.95 },
+  '13-keyboard-permission.md':                     { type: 'lesson', tags: ['adb', 'android', 'elementfrompoint', 'gradle', 'kotlin', 'pointer', 'touch', 'webview', 'windowinsets', '调试', '输入法', '键盘'], group: '键盘', confidence: 0.92 },
+  '14-keyboard-insets.md':                         { type: 'lesson', tags: ['adb', 'android', 'document-start', 'focus', 'gradle', 'ime', 'kotlin', 'webview', 'windowinsets', '动画', '实测', '调试', '键盘'], group: '键盘', confidence: 0.9 },
+  '15-adb-cdp.md':                                 { type: 'procedure', tags: ['adb', 'android', 'cdp', 'monkey', 'webview', '真机', '调试'], group: '调试', confidence: 0.92 },
+  '16-wireless-adb.md':                            { type: 'procedure', tags: ['adb', 'android', 'android11', 'gradle', 'kotlin', 'webview', 'windowinsets', '无线调试', '真机安装', '调试', '防火墙'], group: '调试', confidence: 0.82 },
+  '17-click-injection.md':                         { type: 'lesson', tags: ['adb', 'android', 'miui', 'monkey', 'webview', '实测', '点击', '自动化', '踩坑'], group: '调试', confidence: 0.95 },
+  '18-regression.md':                              { type: 'procedure', tags: ['android', 'webview外壳', '判据', '回归', '基线', '测试'], group: '测试', confidence: 0.9 },
+  '19-testability.md':                             { type: 'decision', tags: ['adb', 'android', 'gradle', 'junit', 'junit4', 'kotlin', 'webview', 'windowinsets', '单元测试', '单测', '可测性', '断言', '测试', '测试基线', '调试'], group: '测试', confidence: 0.86 },
+  '20-performance-verification.md':                { type: 'procedure', tags: ['baseline profile', 'jank', 'macrobenchmark', '启动优化', '性能'], group: '测试', confidence: 0.88 },
+  '21-test-layering.md':                           { type: 'decision', tags: ['ci', 'gradle managed devices', 'instrumented', 'robolectric', '测试'], group: '测试', confidence: 0.92 },
+  '22-page-probe.md':                              { type: 'decision', tags: ['android', 'junit', 'webview', '判据', '可测性', '测试', '设计'], group: '测试', confidence: 0.92 },
+  '23-integration-contract.md':                    { type: 'decision', tags: ['android', 'webview', '决策', '升级', '契约', '文档', '架构', '耦合'], group: '架构', confidence: 0.9 },
+  '24-local-secret-storage.md':                    { type: 'decision', tags: ['allowbackup', 'dataextractionrules', 'token', '存储', '安全', '隐私'], group: '架构', confidence: 0.9 },
+  '25-architecture-layering.md':                   { type: 'decision', tags: ['modularization', 'mvvm', 'viewmodel', '单测', '架构'], group: '架构', confidence: 0.9 },
+  '26-agent-skills-eval.md':                       { type: 'fact', tags: ['adb', 'agent-skills', 'android', 'cdp', 'compose', 'gradle', 'kotlin', 'mcp', 'webview', 'windowinsets', '导航', '技能包', '测试分层', '调试', '选型'], group: '参考资料', confidence: 0.85 },
 };
 
 function readSource(file) {
@@ -46,6 +71,20 @@ function readSource(file) {
 
 const db = new DatabaseSync(DB);
 db.exec('PRAGMA journal_mode=WAL;');
+
+// 先把 META 和磁盘对齐：漏写一篇就会在下面 readSource 里 ENOENT，
+// 多写一个不存在的名字同样报错。宁可在这里明确失败，也不要静默少灌几篇。
+const onDisk = readdirSync(KBDIR).filter(f => f.endsWith('.md')).sort();
+const metaKeys = Object.keys(META).sort();
+const missingMeta = onDisk.filter(f => !META[f]);
+const ghostMeta = metaKeys.filter(f => !onDisk.includes(f));
+if (missingMeta.length || ghostMeta.length) {
+  throw new Error(
+    `META 与 kb/*.md 不一致\n` +
+    `  磁盘有但 META 没写：${missingMeta.join(', ') || '(无)'}\n` +
+    `  META 有但磁盘没有：${ghostMeta.join(', ') || '(无)'}\n` +
+    `  改了文件名或加了篇，就要同步改本文件的 META 表（参照 DB 的 knowledge_entries 导出）。`);
+}
 
 const jobs = [];
 for (const file of Object.keys(META)) {

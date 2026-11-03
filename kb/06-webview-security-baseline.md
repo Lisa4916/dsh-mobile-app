@@ -1,10 +1,5 @@
----
-title: WebView 安全基线：把「加载谁的页面」当成唯一的安全边界
-type: procedure
-tags: webview,安全,javascriptinterface,shouldoverrideurlloading,安全基线
-confidence: 0.95
-group: 外壳
----
+# WebView 安全基线：把「加载谁的页面」当成唯一的安全边界
+
 WebView 的所有安全问题最终都收敛成一个问题：**这个 WebView 现在加载的是谁的页面？** 只要页面可信，JS 桥、文件访问、cookie 都是工具；页面一旦不可信，同一套配置立刻变成漏洞。所以安全设计的第一步不是「关掉哪些开关」，而是「保证加载的永远是可信页面，并且这件事可验证」。
 
 ## 一、同域判定：最容易写错、后果最重的一处

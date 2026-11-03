@@ -1,11 +1,5 @@
----
-id: 3256d358
-title: R8 与发布配置：从「能 debug 就行」到可交付
-type: procedure
-tags: r8,proguard,release,签名,minify,发布
-confidence: 0.93
-group: 构建
----
+# R8 与发布配置：从「能 debug 就行」到可交付
+
 Debug 包能跑不等于能交付。从「自己手机上能开」到「能发出去」之间，有几项是必须补的，而且**其中一项会在你不注意的时候把构建搞成不可复现**。
 
 ## 一、先看现状：release 可能根本构建不出来

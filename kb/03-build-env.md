@@ -24,7 +24,8 @@ Android 构建失败里**绝大多数不是代码问题，是四个版本号互�
 ### 现象 3：`gradle` 不在 PATH
 
 - **根因**：没装系统级 Gradle，只在临时目录解压过一份。
-- **判据**：`gradle -v` 报 `CommandNotFoundException`。
+- **判据**：`gradle -v` 报 `CommandNotFoundException`；或 `Test-Path "$env:TEMP\gradle-short"` 返回 False。**`%TEMP%` 里的工具链会被系统清理**——实测 `%TEMP%\gradle-short` 已被清空过，此时同一条构建命令报的是「路径不存在」，与「没装 Gradle」是同一副面孔，极易被误判成代码问题或版本冲突。
+- **恢复做法**：目录消失时从 Gradle 发行镜像重新下载 8.9 解压回**同一短路径**，再重跑 `assembleDebug` + `testDebugUnitTest` 确认测试基线，不要临时改用缓存里另一份 Gradle 顶替。
 - **正确做法**：用绝对路径调用，不要改 PATH：
 
 ```powershell

@@ -1,10 +1,5 @@
----
-title: 点击注入的三层可信度：DOM click / 坐标点击 / system 级事件
-type: lesson
-tags: android,webview,自动化,点击,monkey,miui,adb,实测,踩坑
-confidence: 0.95
-group: 调试
----
+# 点击注入的三层可信度：DOM click / 坐标点击 / system 级事件
+
 > 适用环境：Android 真机（MIUI/HyperOS 实测 V816，Android 15）+ WebView 外壳 App。web 页面自动化、E2E 验证、UI 回归都适用。
 > 最后验证：2026-11，本项目曾因搞错这一层追查了一个根本不存在的缺陷。
 

@@ -1,10 +1,5 @@
----
-title: 测试分层：Robolectric、真机 instrumented 与 Gradle Managed Devices 各管什么
-type: decision
-tags: 测试,robolectric,instrumented,gradle managed devices,ci
-confidence: 0.92
-group: 测试
----
+# 测试分层：Robolectric、真机 instrumented 与 Gradle Managed Devices 各管什么
+
 「该写哪种测试」这个问题在 Android 上有明确的答案边界，因为**不同层的能力上限不一样**，选错层的代价是测试写了但永远是绿的。
 
 ## 一、三层的能力边界

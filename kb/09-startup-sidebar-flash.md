@@ -1,10 +1,4 @@
----
-title: 启动时侧栏闪一下：DOM 属性先到、样式后到
-type: lesson
-tags: webview,css,transition,启动,闪烁,cdp,实测
-confidence: 0.93
-group: 外壳
----
+# 启动时侧栏闪一下：DOM 属性先到、样式后到
 
 ## 现象
 

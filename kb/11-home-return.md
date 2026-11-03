@@ -1,11 +1,5 @@
----
-id: d7618755
-title: 滑动返回/回主页：用页面内轻量视图切换替代 location.reload()
-type: lesson
-tags: android,webview,webview外壳,返回导航,侧栏,dom,实测,踩坑
-confidence: 0.95
-group: 外壳
----
+# 滑动返回/回主页：用页面内轻量视图切换替代 location.reload()
+
 > 适用环境：dsh-mobile-app 的 WebView 外壳 + DSH 内置页面（Android 15 / SDK 35，Chromium 117 与 131 都验过）。页面元素的 hash 类名（`mOxcpG_*`、`wtg9ga_*`）随页面版本变化，失效时用 §「怎么重新定位」里的探测脚本重新找。
 > 最后验证：2026-11，按键 ×3 + 手势 ×3 全部 `sideL` 恒为 `-217`、零 `Document` 请求。
 

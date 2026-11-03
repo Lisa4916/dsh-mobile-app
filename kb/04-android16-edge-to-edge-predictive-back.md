@@ -1,10 +1,5 @@
----
-title: Android 16 强制 edge-to-edge 与 predictive back：WebView 外壳的完整迁移面
-type: procedure
-tags: android 16,edge-to-edge,predictive back,windowinsets,webview,targetsdk 36
-confidence: 0.95
-group: 外壳
----
+# Android 16 强制 edge-to-edge 与 predictive back：WebView 外壳的完整迁移面
+
 `targetSdk 36` 有两个变更对 WebView 外壳类是**成对出现**的，而且都在「不报错、只是行为变了」这一档。分开做会来回返工，一起做一次到位。
 
 ## 一、edge-to-edge 不再可选

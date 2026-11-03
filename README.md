@@ -18,7 +18,7 @@
 | 接手方式（含可粘贴交接卡） | §8 |
 | 风险与依赖 | §9 |
 
-`AGENTS.md` 是**施工手册**（构建、源码地图、33 条踩坑）；`PROGRESS.md` 是**施工日志**（每步做了什么、证据是什么）。
+`AGENTS.md` 是**施工手册**（构建、源码地图、踩坑清单 §6.1–§6.33）；`PROGRESS.md` 是**施工日志**（每步做了什么、证据是什么）。
 
 ---
 ## 在别的窗口 / 新会话接手这个项目
@@ -433,6 +433,88 @@ node tools\publish-release.cjs --no-bump        # 打 tag 并推送
   这个包里不含 PIN，但含你的包名与签名 —— 不想公开就把仓库设成 private。
 - **Release 只发 release 包**，不带 `debuggable`。要抓 CDP 调试还是本机 `adb install` debug 包。
 
+### 签名材料备份与恢复
+
+`release/` 整个目录被 `.gitignore` 忽略（`.gitignore:23`），**仓库里没有任何一份签名材料**。
+换机器 / 重装系统 / 误删 `release/`，密钥就没了 —— 而 keystore 一旦丢失，
+同包名的新包就再也覆盖安装不到已装的手机上（只能用不同证书重装，相当于换 App）。
+
+所以额外维护一个**私有仓库**存加密备份：
+
+```
+https://github.com/Lisa4916/dsh-mobile-app-secrets
+```
+
+里面只有 4 个文件：`README.md` + `enc/` 下三个 AES-256-CBC 密文。
+**口令不在这个仓库里**，也不在任何仓库里 —— 只在本机
+`build-artifacts/secrets-backup-out/BACKUP-PASSPHRASE.txt`（同样被 gitignore）。
+**请自己抄一份到密码管理器或纸上**，这是唯一的单点。
+
+| 明文文件 | 密文 | 原始 SHA-256 |
+|---|---|---|
+| `release/dsh-remote.jks` (4,384 B) | `enc/dsh-remote.jks.enc` (4,416 B) | `e7680aa0d5ab0c20ef044814f606c8d8c3c5b62c31bb665f40cd3d2751c71ea2` |
+| `release/keystore.b64` (5,848 B) | `enc/keystore.b64.enc` (5,872 B) | `0809b52e256c7e430fed9723ea940074517e912af40ba7fb88a3dfd2bf6f5f17` |
+| `release/password.txt` (24 B) | `enc/KEYSTORE_PASSWORD.txt.enc` (48 B) | `7ad6196977d17970527aff85a1ad6d817c1a8dd8d0e91bcb899fe2821d337609` |
+
+加密参数：`aes-256-cbc` + `pbkdf2` + `iter 200000` + `-salt`（openssl 3.x 默认摘要 SHA-256）。
+证书主体 `CN=DSH Remote, OU=Personal, O=Personal, L=Local, C=CN`，SHA-256 指纹前缀 `12912cf9`。
+
+**恢复（新机器上跑）**：
+
+```powershell
+$ErrorActionPreference = 'Stop'
+$OpenSsl = 'C:\Program Files\Git\usr\bin\openssl.exe'   # Git for Windows 自带
+$Tmp     = Join-Path $env:TEMP ('dsh-secrets-' + [guid]::NewGuid().ToString('N').Substring(0,8))
+
+# 1) 拉密文（此步需要能连 github.com 的网络）
+& 'C:\Program Files\Git\cmd\git.exe' clone https://github.com/Lisa4916/dsh-mobile-app-secrets.git $Tmp
+
+# 2) 读口令（不会回显，也不会进历史）
+$pass = Read-Host '备份口令' -AsSecureString
+$pass = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+          [Runtime.InteropServices.Marshal]::SecureStringToBSTR($pass))
+
+# 3) 解密到临时目标（等价于逐个跑 openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass pass:<口令>）
+$out = Join-Path $Tmp 'plain'; New-Item -ItemType Directory -Force $out | Out-Null
+foreach ($n in 'dsh-remote.jks','keystore.b64','KEYSTORE_PASSWORD.txt') {
+    & $OpenSsl enc -d -aes-256-cbc -pbkdf2 -iter 200000 `
+        -in (Join-Path $Tmp "enc\$n.enc") -out (Join-Path $out $n) -pass "pass:$pass"
+    if ($LASTEXITCODE -ne 0) { throw "解密失败：$n" }
+}
+
+# 4) 校验：三个 SHA-256 必须与上表逐字相同
+$want = @{
+  'dsh-remote.jks'         = 'e7680aa0d5ab0c20ef044814f606c8d8c3c5b62c31bb665f40cd3d2751c71ea2'
+  'keystore.b64'           = '0809b52e256c7e430fed9723ea940074517e912af40ba7fb88a3dfd2bf6f5f17'
+  'KEYSTORE_PASSWORD.txt'  = '7ad6196977d17970527aff85a1ad6d817c1a8dd8d0e91bcb899fe2821d337609'
+}
+foreach ($n in $want.Keys) {
+    $got = (Get-FileHash (Join-Path $out $n) -Algorithm SHA256).Hash.ToLower()
+    if ($got -ne $want[$n]) { throw "SHA 不匹配：$n`n  want=$($want[$n])`n  got =$got" }
+    "OK  $n  $got"
+}
+
+# 5) 放回 release/（password.txt 恢复原名）
+New-Item -ItemType Directory -Force 'D:\dsh-mobile-app\release' | Out-Null
+Copy-Item (Join-Path $out 'dsh-remote.jks')        'D:\dsh-mobile-app\release\dsh-remote.jks'        -Force
+Copy-Item (Join-Path $out 'keystore.b64')          'D:\dsh-mobile-app\release\keystore.b64'          -Force
+Copy-Item (Join-Path $out 'KEYSTORE_PASSWORD.txt') 'D:\dsh-mobile-app\release\password.txt'          -Force
+Remove-Item $Tmp -Recurse -Force
+```
+
+第 4 步的三行 `OK` 是**唯一验收标准**：SHA 对不上就别往 `release/` 里放。
+
+**若口令丢了**：keystore 打不开 = 密钥没了，唯一出路是重新生成 keystore
+（新证书 → 手机上必须先卸载再装，已保存的连接会丢）。这时把旧的三个 `.enc`
+从私有仓删掉、换新口令重加密一遍，并把新口令抄走。
+
+**只换口令不换钥**（口令怀疑外泄时）：用旧口令解开、用新口令重加密、
+`git push --force-with-lease` 覆盖私有仓（历史里仍是旧密文，所以**同时换口令**才彻底）。
+
+> 这套备份**只在能连 github.com 的网络里可用**。本机当前 `github.com:443` 传输层时通时不通
+> （`api.github.com` 正常），`git clone` 会失败 —— 恢复这一步得换网络或开代理再做。
+> 用 `node tools\verify-delivery.mjs` 可以随时复核备份是否仍然可解密（它走 GitHub API 取 blob，绕开 git 传输层）。
+
 ## 验证证据
 
 | 项 | 结果 |
@@ -451,6 +533,7 @@ node tools\publish-release.cjs --no-bump        # 打 tag 并推送
 | 反向分支 | 地址不带 token 时停在验证页、不清 cookie（`tools/verify-ask-user.cjs` 三项全过） |
 | 键盘弹出 | 帧间隔中位数 11ms，全程 177ms，单调无回弹 |
 | 键盘收起 | rootH 574→895，composerTop 324→484，逐帧 |
+| **三重验收** | `node tools\verify-delivery.mjs` → **14/14 通过**：签名备份 clone→解密→三文件 SHA-256 全 MATCH；知识库 DB 26/26/26 全 ready 且与 `kb/` 26 篇一一对应（0 个 DB-only、0 个孤立源）；三份文档口径无矛盾 |
 
 ## 调试工具链（`tools/`）
 
@@ -489,6 +572,7 @@ node tools\publish-release.cjs --no-bump        # 打 tag 并推送
 | `publish-release.cjs` | `node tools/publish-release.cjs --bump patch` 升版本并提示提交；`--no-bump` 打 tag 并推送，触发 `release.yml` 建 GitHub Release |
 | `push-via-api.mjs` | 兜底：`github.com:443` 的 git 传输不通、但 `api.github.com` 正常时，用 Git Data API 把 HEAD 推上去。`--all` 全量重推（会按 git 对象字节与 mode 上传，远端树必须等于本地 `HEAD^{tree}`） |
 | `tag-only.mjs` | 兜底：远端 master 已就位、只缺 tag 时用它。取版本号的正则必须锚行首，否则抓到注释里的旧版本号 |
+| `verify-delivery.mjs` | **只读验收**：`node tools\verify-delivery.mjs`，退出码 0/1。A 组走 clone→解密→SHA 验签名备份可恢复，B 组验 DB 26 篇 ↔ `kb/` 源 md 一一对应，C 组验三份文档口径无矛盾（不再写死踩坑总数、AGENTS 声明了「以小节号为准」、README 含备份仓地址与解密命令） |
 | `ui-dump.cjs` | `node tools/ui-dump.cjs <ui.xml>`，把 `uiautomator dump` 的 XML 打成「文本 / 类 / bounds / 中心点」，找 adb 点击坐标的最快路径 |
 
 `_` 前缀的是早期一次性探针（`_probe-cur.cjs`、`_probe-page.cjs`、`_probe-storage.cjs`、`_tabs.cjs`、`_test-reset.cjs`），留作参考，不进主流程。

@@ -89,7 +89,7 @@ dsh.lanPin=<token-lan 的内容>
 | 怎么接手 | §8（三种起法 + 可粘贴交接卡） |
 | 有哪些坑在等着 | §9 风险与依赖（含 GitHub TLS 时通时不通的兜底） |
 
-**本文件（AGENTS.md）是施工手册**：构建命令、源码地图、33 条踩坑。
+**本文件（AGENTS.md）是施工手册**：构建命令、源码地图、踩坑清单（§6.1–§6.33，以小节号为准）。
 **`PROGRESS.md` 是施工日志**：每一步做了什么、验证证据是什么。三者分工别混。
 
 ---
@@ -121,7 +121,7 @@ DSH 的指令加载规则（`@deepseek-ai/dsh-agent-instructions`）只有两条
 ```
 项目：D:\dsh-mobile-app（Android WebView 外壳，包名 com.dsh.remote）
 立项书：PROJECT-CHARTER.md（定义/非目标/里程碑/验收口径/风险）
-入口文件：AGENTS.md（构建/源码地图/33 条踩坑）、PROGRESS.md（24 步证据）、README.md（对外说明）
+入口文件：AGENTS.md（构建/源码地图/踩坑清单 §6.1–§6.33）、PROGRESS.md（24 步证据）、README.md（对外说明）
 构建前必须设：JAVA_HOME=D:\AndroidDev\jdk17  ANDROID_HOME=D:\AndroidDev\sdk  ANDROID_SDK_ROOT=D:\AndroidDev\sdk
 gradle：C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat
 基线：tests=235 failures=0；lint 0 error / 22 warning；release APK 1,947,334 B
@@ -341,6 +341,8 @@ adb shell am instrument -w -r -e class com.dsh.remote.PageProbeJsTest \\
 ---
 
 ## 6. 踩坑清单（全部已解决，防重犯）
+
+> **编号口径：§6.1–§6.33，以小节号为准。** 本清单只增不改号，引用某条坑时写小节号（如「见 §6.32」），不要写「前 N 条」「共 N 条」——总数会随新增而变，写死就会过期。
 
 ### 6.1 JVM 单测里 `android.net.Uri` 是 stub
 `Uri.parse` 直接抛 `Stub!`。`Endpoint.kt` 因此改成纯 JDK（`java.net.URI` + 手写规范化），换来可测性。
@@ -1100,15 +1102,31 @@ https：//xxx－yyy。trycloudflare。com/？token=87654321
 **开发前先查**：遇到「这个 Android 问题以前怎么解决的」「构建为什么失败」「真机行为怎么量」，先 `knowledge_search`，
 不要重新推一遍。库里每条都是本机实测结论，带环境标注。
 
-种子文档在 `kb/`（5 篇 Markdown），**后续修订/新增放 `kb/updates/`**（front-matter 带 `id` = 更新该篇，省略 = 新建）。
+种子文档源就是 **`kb/` 顶层的 26 个 `NN-*.md`**（编号 01–26 连续，与库里 26 篇一一对应）。
+**没有 `kb/updates/` 暂存区了** —— 2026-11-03 的整理把 19 个草稿并进顶层后删掉了该目录，原因是两处同名文档
+谁新谁旧全靠人记，历史上真的分叉过一次（`04-adb-cdp` 两处各一版、差 60 行）。同题旧版归档在 `kb/archive/`。
 入库与更新脚本在 `tools/`：
 
 | 脚本 | 用途 |
 |---|---|
-| `kb-ingest.mjs` | **只用于首次灌种子**：读 `kb/*.md` → 插件自己的函数渲染/哈希/切节 → 一个事务写 5 张表 + 落盘 md。`--dry` 只打印。**再次运行会新建重复条目** |
-| `kb-update.mjs` | **改库内容走这个**：读 `kb/updates/*.md`，逐篇走 `LocalKnowledgeProvider.update()` / `create()`，随后核对 entries / `knowledge_documents` / versions / passage。`--dry` 只打印。**加 `--only '<regex>'` 限定本次处理哪些文件** —— 不加会把这个目录里所有已入库的文档再各升一版 |
+| `kb-update.mjs` | **改库内容走这个**（默认命令）：扫 `kb/*.md`，逐篇走 `LocalKnowledgeProvider.update()` / `create()`，随后核对 entries / `knowledge_documents` / versions / passage。**正文与库里一字不差的篇目直接跳过**，不会白涨版本号。`--dry` 只打印；`--only '<regex>'` 限定本次处理哪些文件 |
+| `kb-ingest.mjs` | **只在全库重建时用**：读 `kb/*.md` → 插件自己的函数渲染/哈希/切节 → 一个事务写 5 张表 + 落盘 md。`--dry` 只打印。**对已有的库再跑会新建 26 条重复条目**（它不查重）。内置 META 表必须与 `kb/` 文件名一一对应，不一致会直接抛错并列出差集 |
 | `kb-verify.mjs` | 全库核对：5 表计数、`validStructure` 校验、磁盘 md 能否解回、FTS 召回试探 |
 | `kb-mount.mjs` | 挂载到项目目录 |
+
+**改一篇的完整动作**（这是日常路径）：
+
+```powershell
+cd D:\dsh-mobile-app
+node tools\kb-update.mjs --dry --only 14-     # 先看它认得哪篇、会不会写
+node tools\kb-update.mjs       --only 14-     # 真写
+node tools\kb-verify.mjs                      # 26/26/26 全 ready 才算完
+node tools\verify-delivery.mjs                # B 组会复核 DB ↔ kb/ 一一对应
+```
+
+编辑 `kb/*.md` 时**只改正文，别改一级标题**：脚本就是靠标题在库里做精确匹配的。
+真要改标题，先按老标题把正文同步进去，再单独走一次带 front-matter 的改名（`id:` 指到那篇）。
+**新建篇目必须带 front-matter**（`type`/`tags`/`confidence`/`group`），脚本不会替你猜元数据。
 
 **每次改库前先备份**：`VACUUM INTO` 出一个快照（不要只靠 `.bak` 文件复制，WAL 模式下复制不安全）：
 
@@ -1116,10 +1134,10 @@ https：//xxx－yyy。trycloudflare。com/？token=87654321
 new DatabaseSync(DB).exec(`VACUUM INTO 'C:/Users/yaoqi/.dsh/knowledge/snapshot-<时间戳>.sqlite'`)
 ```
 
-`kb/updates/*.md` 的 front-matter：
+`kb/*.md` 的 front-matter（**可选**；只有新建篇目、或要改元数据时才需要）：
 ```
 ---
-id: d7618755      # 省略 = 新建；给出 = 更新该 id（前缀必须唯一命中）
+id: d7618755      # 省略 = 按一级标题匹配已有条目；给出 = 更新该 id（前缀必须唯一命中）
 title: ...
 type: lesson      # preference | fact | decision | procedure | lesson
 tags: a,b,c

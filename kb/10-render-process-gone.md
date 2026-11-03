@@ -1,10 +1,5 @@
----
-title: 渲染进程被回收：WebView 脆弱的真正来源与兜底写法
-type: procedure
-tags: webview,onrenderprocessgone,稳定性,内存,闪退
-confidence: 0.95
-group: 外壳
----
+# 渲染进程被回收：WebView 脆弱的真正来源与兜底写法
+
 用 WebView 做外壳的 App，闪退报告里有一大类根因是同一个：**渲染进程被系统回收了，而 App 没有接管**。不覆盖 `onRenderProcessGone` 时，平台的默认行为是**把宿主进程一起杀掉** —— 用户看到的就是「用着用着闪退」。
 
 ## 一、为什么会发生

@@ -1,11 +1,5 @@
----
-id: 0cb36dae
-title: WebView 握手自愈闸门：401 裸页判据、cookie 清理范围与退避重试
-type: lesson
-tags: android,webview,webview外壳,cookie,自愈,重建,退避,实测
-confidence: 0.95
-group: 外壳
----
+# WebView 握手自愈闸门：401 裸页判据、cookie 清理范围与退避重试
+
 > 适用环境：WebView 外壳 App（dsh-mobile-app）+ 中间层 `proxy.mjs` 反向代理，真机实测（Android 14 / 15）。
 > 最后验证：2026-11，正反两向都在真机抓到决定性证据。
 

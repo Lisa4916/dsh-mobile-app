@@ -1,11 +1,5 @@
----
-id: eb3c513a
-title: WebView 登录态自愈：端口变更后遗留 cookie 导致 401 白屏
-type: lesson
-tags: android,webview,webview外壳,cookie,自愈,端口,实测
-confidence: 0.92
-group: 外壳
----
+# WebView 登录态自愈：端口变更后遗留 cookie 导致 401 白屏
+
 > 适用环境：Android WebView 外壳（dsh-mobile-app 项目实测，Android 14 / 15）。凡依赖 cookie 鉴权的 WebView 外壳都适用。
 > 最后验证：2026-11。本文只讲「端口变了」这一种故障；完整的三态判据与两种清理范围见《WebView 握手自愈闸门》。
 

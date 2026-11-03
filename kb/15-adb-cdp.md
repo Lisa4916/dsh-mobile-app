@@ -1,11 +1,5 @@
----
-id: f71d31a1
-title: ADB + CDP 真机调试：当截图和录屏都不可信时怎么测
-type: procedure
-tags: adb,cdp,调试,android,真机,webview,monkey
-confidence: 0.92
-group: 调试
----
+# ADB + CDP 真机调试：当截图和录屏都不可信时怎么测
+
 > 适用环境：Windows 主机 + Android 真机（MIUI/HyperOS V816、Android 15、WebView 131；另一台 Moto XT2335-3 / Android 14 / WebView 117），WebView 应用。
 > 最后验证：2026-11
 

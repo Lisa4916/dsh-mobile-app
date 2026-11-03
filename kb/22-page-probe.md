@@ -1,10 +1,5 @@
----
-title: 页面判据（page probe）的可测化设计：拆成「取值」与「判状态」两半
-type: decision
-tags: android,webview,junit,测试,可测性,设计,判据
-confidence: 0.92
-group: 测试
----
+# 页面判据（page probe）的可测化设计：拆成「取值」与「判状态」两半
+
 > 适用环境：任何「在 WebView / 浏览器里读页面状态并据此做决策」的 App。本项目是 dsh-mobile-app 的自愈判据。
 > 最后验证：2026-11，`PageProbeTest` 20 例 + 真机 `PageProbeJsTest` 7 例全绿。
 

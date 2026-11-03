@@ -11,7 +11,7 @@
 | 状态 | **A 档已交付**（真机可用、可发版）；B 档待排期 |
 | 当前版本 | `0.5.0` / `versionCode=5`（Release `v0.5.0` 已发布） |
 | 仓库 | `D:\dsh-mobile-app`，远端 `https://github.com/Lisa4916/dsh-mobile-app`（public，`master`） |
-| 规模 | 35 个 `.kt`（main 19 / 4125 行 + test 15 / 2240 行）+ 60 个 `tools/` 脚本；43 个提交 |
+| 规模 | 35 个 `.kt`（main 19 / 4125 行 + test 15 / 2240 行，另 androidTest 1 / 181 行）+ 62 个 `tools/` 脚本（提交数见 `git log`，不在此写死） |
 | 单测基线 | **`tests=235 failures=0 errors=0`**（15 个测试类）；lint **0 error / 22 warning** |
 | 上游依赖 | `dsh-pocket` 2.12.0（反代 :3081 + 认证 + 公网隧道），非本仓库 |
 
@@ -132,14 +132,14 @@ dsh-pocket 反代 :3081（外部组件，不改它；认证 + cookie + 注入 la
 
 | 文件 | 职责 |
 |---|---|
-| `AGENTS.md` | 构建环境、源码地图、**33 条踩坑清单**（§6.1–§6.33）、交接卡（§1.5） |
+| `AGENTS.md` | 构建环境、源码地图、**踩坑清单**（§6.1–§6.33，以小节号为准）、交接卡（§1.5） |
 | `PROGRESS.md` | 24 步的「做了什么 + 验证证据」，每步一节 |
 | `INTEGRATION.md` | 与 dsh-pocket 的**耦合面清单** + 升级检查清单 |
 | `CONTEXT-ANCHOR.md` | 立项初期的方案选择记录（历史存档，部分数字已过期并标注更正） |
 | `README.md` | 对外说明：现状、源码表、测试表、构建、发版、待办 |
 | `version.properties` | 版本号**唯一事实来源**（Android 只允许 versionCode 不降的覆盖安装） |
 | `app/src/main/java/com/dsh/remote/` | 19 个源文件；核心决策类见 `AGENTS.md` §4 源码地图 |
-| `tools/` | 60 个零依赖 Node / Python 脚本（CDP 探测、真机点击、发版、知识库、证据采集） |
+| `tools/` | 62 个零依赖 Node / Python 脚本（CDP 探测、真机点击、发版、知识库、验收、证据采集） |
 | `.github/workflows/` | `ci.yml`（推 master 触发）+ `release.yml`（推 `v*` tag 触发，产出 Release 资产） |
 
 ---

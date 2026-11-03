@@ -1,10 +1,5 @@
----
-title: Android 平台版本节奏与 targetSdk 升级窗口
-type: fact
-tags: android,targetsdk,google play,版本兼容,api level
-confidence: 0.95
-group: 构建
----
+# Android 平台版本节奏与 targetSdk 升级窗口
+
 写手机 App 的人最容易被「targetSdk 什么时候必须升」这件事打乱节奏。这里把已经确定的日期和每条硬约束写在前面，作为排期依据。
 
 ## 一、已确定的日期

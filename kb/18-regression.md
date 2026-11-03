@@ -1,11 +1,5 @@
----
-id: 1d1c339c
-title: 全量回归检测清单：模块 / 边界 / 性能与判据来源
-type: procedure
-tags: android,测试,回归,基线,判据,webview外壳
-confidence: 0.9
-group: 测试
----
+# 全量回归检测清单：模块 / 边界 / 性能与判据来源
+
 > **用途**：每 4~6 周，或每次改外壳 / 键盘 / 导航 / 自愈后，按这张表复跑一遍，可对比、不靠记忆。
 > **适用环境**：Windows 主机 + Android 真机，WebView 外壳 App（dsh-mobile-app）。基线建于 2026-11。
 

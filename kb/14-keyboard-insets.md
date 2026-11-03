@@ -225,3 +225,15 @@ ViewCompat.setWindowInsetsAnimationCallback(view, callback)
 2. 逐帧打自己设的尺寸值。如果每帧之间穿插了一条"终值"，说明有第二个调用路径在灌终值（本次就是 `setOnApplyWindowInsetsListener` 的终值与 `onProgress` 的中间态并发）。
 3. 页面侧装 rAF 采样器，同钟对时，量跨度。跨度差 2 倍就是批处理问题。
 4. 确认单位（设备像素 vs CSS px）。
+
+## 键盘区为“不存在的键盘”让位：页面自动聚焦是根因
+
+- **现象**：进入会话页后，底部留出一整块键盘区（实测 `#root` 高 **574px**、`--dsh-native-keyboard` = **321px**），但系统键盘根本没有弹出（`mInputShown` = **false**）。
+- **判据（三条同时成立才算“假键盘”）**：`document.activeElement` 是输入框（本例为 `GRgSLq_input`）、`#root` 高度已缩到 `innerHeight - 321`、`mInputShown=false`。控件树 bounds 只能证明布局让位，**不能证明键盘存在**。
+- **根因**：页面渲染完成后自动把焦点交给输入框。IME 因非真实触摸而不弹出（见《ADB + CDP 真机调试》七），但键盘避让仍按 insets 终值推了 321px。**避让逻辑本身没有错**：真实点击输入框时是 574/321px 且 `mInputShown=true`，收键盘复位 895/0px，反复验证一致。错的是“给谁让位”。
+- **正确做法**：在 **document-start** 注入 `FOCUS_GUARD_JS`——非用户触摸引起的输入框聚焦，一律 `blur()` 并清选区。注入时机是关键：等到 `onPageFinished` 再注入已经晚了，那时页面已经聚焦过。（《WebView 外壳 + JS 桥》坑 3 建议在 `onPageFinished` 注入，那是针对 hook 被首页重置的情形；拦截“渲染即刻发生”的事件必须提前到 document-start。）
+- **最终语义**（简单比精确可靠）：只要有触摸就放行本次聚焦，触摸后 1.2 秒作废。自动聚焦发生在渲染完成那一刻、手指未接触屏幕，因此会被回退。
+- **两次失败的做法，别再试**：
+  1. 触摸后 N ms 内放行：窗口短了真实点击被忽略，窗口长了挡不住自动聚焦，找不到可用阈值。
+  2. 用 `elementFromPoint` 判断手指是否落在输入框上：对 `adb shell input tap` 的合成触摸不可靠。
+- **验证数据**：冷启动 895/空/active 空；重新进入会话 895/空/active 空且 `mInputShown=false`；真实触摸输入框 574/321 且 `mInputShown=true`；点空白复位 895/0。反复 5 次点击切换 4 成 1，那次“失败”实为当时键盘本来开着、点空白把它收起（是正确行为而非回归）。单测 22 个全通过。

@@ -1,10 +1,5 @@
----
-title: 性能验证：Baseline Profile 与 Macrobenchmark 什么时候值得做
-type: procedure
-tags: 性能,baseline profile,macrobenchmark,启动优化,jank
-confidence: 0.88
-group: 测试
----
+# 性能验证：Baseline Profile 与 Macrobenchmark 什么时候值得做
+
 性能优化最容易被做成「凭感觉调」。真正能拿数字说话的工具有两个：**Baseline Profile**（让 ART 提前编译热点代码）和 **Macrobenchmark**（在真机上量启动与滚动）。但对一个几百毫秒量级的外壳 App，它们值不值得做要算清楚。
 
 ## 一、Baseline Profile 到底解决什么

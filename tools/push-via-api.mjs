@@ -57,6 +57,20 @@ function changedFiles(base) {
   return out ? out.split('\n').map((s) => s.trim()).filter(Boolean) : [];
 }
 
+// 相对 base 消失的文件（真正被删的 + 被重命名的源路径）。
+// 必须单独处理：只搬「改动文件」的话，远端 base_tree 里那份旧文件会原样留着，
+// 于是远端树永远比本地树多东西（重命名/归档时必踩）。
+// 注意 `git diff --name-only` 对 rename 只吐目标路径，源路径要靠 --diff-filter=D 是抓不到的，
+// 所以这里直接比两棵树的文件清单。
+function deletedFiles(base) {
+  const list = (rev) => {
+    const out = git(['ls-tree', '-r', '--name-only', rev]);
+    return out ? out.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+  };
+  const now = new Set(list('HEAD'));
+  return list(base).filter((p) => !now.has(p));
+}
+
 // 全量同步时用：HEAD 里所有被跟踪的文件，带 git 的 mode
 // **mode 必须照抄**：`gradlew` 是 100755，统一写 100644 会让远端树与本地树对不上，
 // 而 CI 里 `./gradlew` 正好需要那个可执行位。
@@ -88,8 +102,9 @@ const ALL = args.includes('--all');   // 全量重推所有被跟踪文件（修
   console.log('本地 HEAD =', headSha.slice(0, 7), '|', msg);
 
   const files = ALL ? trackedFiles() : changedFiles(BASE);
-  console.log(ALL ? `全量模式：${files.length} 个文件` : `对比基准 ${BASE}：${files.length} 个文件`);
-  if (!files.length) { console.log('没有差异，退出'); return; }
+  const dels = ALL ? [] : deletedFiles(BASE);
+  console.log(ALL ? `全量模式：${files.length} 个文件` : `对比基准 ${BASE}：${files.length} 个文件，删 ${dels.length} 个`);
+  if (!files.length && !dels.length) { console.log('没有差异，退出'); return; }
 
   const remote = await api('GET', `/repos/${OWNER}/${REPO}/git/ref/heads/master`);
   const baseCommitSha = remote.json.object.sha;
@@ -102,6 +117,9 @@ const ALL = args.includes('--all');   // 全量重推所有被跟踪文件（修
   const tree = [];
   for (const f of files) {
     const rel = typeof f === 'object' ? f.path : f;
+    // changedFiles 里会混进「被删/被重命名的源路径」，它们只在 base 里存在。
+    // 对这类路径不要去 cat-file HEAD，交给下面的 sha:null 删除条目处理。
+    if (!ALL && dels.includes(rel)) continue;
     const mode = modeOf(f);
     const content = gitBlob(`HEAD:${rel}`);         // ← 用 git 对象里的字节，避开 CRLF
     const blob = await api('POST', `/repos/${OWNER}/${REPO}/git/blobs`, {
@@ -112,6 +130,11 @@ const ALL = args.includes('--all');   // 全量重推所有被跟踪文件（修
     tree.push({ path: rel.replace(/\\/g, '/'), mode, type: 'blob', sha: blob.json.sha });
   }
   console.log(`  ${tree.length} 个 blob 已上传`);
+  // sha:null 表示删掉该路径；这是 base_tree 模式下唯一的删除手段
+  for (const rel of dels) {
+    tree.push({ path: rel.replace(/\\/g, '/'), mode: '100644', type: 'blob', sha: null });
+  }
+  if (dels.length) console.log(`  ${dels.length} 个删除条目已标记`);
 
   const newTree = await api('POST', `/repos/${OWNER}/${REPO}/git/trees`, { ...treeBody, tree });
   if (newTree.status !== 201) throw new Error(`tree -> ${newTree.status} ${newTree.text}`);
@@ -133,6 +156,12 @@ const ALL = args.includes('--all');   // 全量重推所有被跟踪文件（修
   console.log('更新 master ->', upd.status, upd.json && upd.json.object ? upd.json.object.sha.slice(0, 7) : upd.text);
 
   // 打 tag（annotated）
+  // 一般文档提交不要重打版本 tag：v0.5.0 已经在远端，重复 POST 会 422 Reference already exists，
+  // 于是明明主分支推成功了，脚本还是以非零退出。--no-tag 显式关掉。
+  if (NO_TAG) {
+    console.log('跳过 tag（--no-tag）');
+    return;
+  }
   const ver = fs.readFileSync(path.join(ROOT, 'version.properties'), 'utf8');
   // 必须锚定行首：注释里也有一句 `-Pdsh.versionName=0.2.1`，不锚定会抓到它
   const name = /^versionName=([\d.]+)\s*$/m.exec(ver)[1];

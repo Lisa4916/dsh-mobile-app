@@ -814,6 +814,15 @@ https://github.com/<owner>/<repo>/releases/latest/download/dsh-remote-latest.apk
    `tools/push-via-api.mjs --all` 会打印这个对比，不一致就别当推成功了。
    全量重推时不要带 `base_tree`，否则远端独有的旧文件会残留成幽灵文件。
 
+   **增量模式还必须显式发删除条目。** 只搬「改动文件」时，远端 `base_tree` 里那些被删的、
+   或被 rename 掉的源路径会原样留着，于是远端树比本地树多出十几个文件、sha 永远对不上。
+   两个细节：
+   1. `git diff --name-only` 对 rename **只吐目标路径**，源路径得用 `--diff-filter=D` 单独抓，
+      更稳的做法是直接比 `git ls-tree -r --name-only <base>` 与 `HEAD` 的差集。
+   2. 删除在 base_tree 模式下的唯一写法是 `{ path, mode:'100644', type:'blob', sha: null }`。
+      而且这些源路径会混在 `changedFiles` 里，循环时必须先跳过，否则 `git cat-file blob HEAD:<已删路径>`
+   直接 `fatal: path ... does not exist in 'HEAD'`。
+
    **发版前先探一句 `git ls-remote origin`**，不通就别指望 `publish-release.cjs` 能推上去。
    另一个反复出现的前提：本地 `git config http.proxy` 指着 `127.0.0.1:7890`，而 mihomo 不在时
    报 `Could not connect to server`；确认端口没人听就 `git config --local --unset http.proxy`
@@ -1085,7 +1094,7 @@ https：//xxx－yyy。trycloudflare。com/？token=87654321
 | `publish-apk.cjs` | `node tools/publish-apk.cjs [--no-build] [--bump patch / minor / major]`，构建 release 并发布到 `dist/`（APK + `latest.json` + 自包含下载页） |
 | `serve-apk.cjs` | `node tools/serve-apk.cjs [port]`，把 `dist/` 发布成局域网下载页（默认 8123，支持 Range），另一台手机浏览器打开即可装机与收更新 |
 | `publish-release.cjs` | `node tools/publish-release.cjs --bump patch` 升版本并提示提交；`--no-bump` 打 tag 推 origin，触发 `release.yml` 建 GitHub Release（手机用固定地址收更新，见 §6.30） |
-| `push-via-api.mjs` | **兜底**：`github.com:443` 的 git 传输不通时，用 Git Data API（blobs → trees → commits → refs）把 HEAD 推到远端并打 tag（§6.30）。git 通道正常时用不到 |
+| `push-via-api.mjs` | **兜底**：`github.com:443` 的 git 传输不通时，用 Git Data API（blobs → trees → commits → refs）把 HEAD 推到远端并打 tag（§6.30）。git 通道正常时用不到。**文档提交记得加 `--no-tag`**——不然它会拿 `version.properties` 里的版本号重打一次 tag，远端已存在就 422，主分支明明推成功了脚本却非零退出 |
 | `tag-only.mjs` | **兜底**：远端 master 已在正确位置、只缺 tag 时用它。取版本号的正则**必须锚行首**，否则会抓到注释里的旧版本号 |
 | `ui-dump.cjs` | `node ui-dump.cjs <ui.xml>`，把 `uiautomator dump` 的 XML 打成「文本 / 类 / bounds / 中心点」，给 adb 点控件找坐标的最快路径 |
 

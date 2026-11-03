@@ -594,6 +594,25 @@ CDP 转发要点：`cat /proc/net/unix | grep webview_devtools_remote` 会返回
 所以现在默认全量（`--all`）重推并**打印 tree 对比**：一致才算推成功。
 `--all` 时不带 `base_tree`，否则远端独有的旧文件会残留成幽灵文件。
 
+### 增量推送的两个新坑（重命名/归档时必踩）
+
+真按「只推改动的文件」走 `git diff --name-only <base>..HEAD` 时，还有两件事会咬人：
+
+1. **rename 的源路径拿不到。** `git diff --name-only` 对 rename 只吐目标路径，
+   `--diff-filter=D` 也抓不到被 rename 掉的源文件。远端 `base_tree` 里那一份就留成了幽灵。
+   稳的写法是直接比清单：`git ls-tree -r --name-only <base>` 减去 `HEAD` 的清单。
+2. **删除必须显式发条目。** `base_tree` 模式下唯一的删除写法是
+   `{ path, mode: '100644', type: 'blob', sha: null }`。而这些源路径又会混在「改动文件」列表里，
+   循环里必须先跳过，否则 `git cat-file blob HEAD:<已删路径>` 直接
+   `fatal: path '…' does not exist in 'HEAD'`。
+
+修完这两条，`node tools/push-via-api.mjs 659a265 --no-tag` 一次通过：
+34 个 blob + 24 个删除条目，`新 tree = dbb73edb… （与本地树一致 ✅）`。
+
+**文档提交记得加 `--no-tag`。** 脚本末尾默认会用 `version.properties` 里的版本号重打一次
+annotated tag，`v0.5.0` 已经在远端，重复 POST 返回 422 `Reference already exists` ——
+主分支明明推成功了，脚本却以非零退出，很容易被当成失败。
+
 ## 待办（下一档 B）
 
 已完成、不再列在这里的：局域网自动发现（第 22 步）、免 PIN 直进主界面（第 23 步）、

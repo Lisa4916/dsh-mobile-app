@@ -76,12 +76,55 @@ class PocketStatusTest {
     }
 
     @Test
-    fun publicEndpoint_returnsNullForNonCloudflareHost() {
-        val weird = live.replace(
+    fun publicEndpoint_returnsNullForLoopbackAndPrivateHosts() {
+        // 「公网隧道」档案里出现回环/私网地址是纯粹的误导：那条链接只在同一台机器
+        // 或同一个 Wi-Fi 里能开。这类值必须拒掉，而**不是**靠后缀白名单拒。
+        val loopback = live.replace(
             "https://tunnel-a.trycloudflare.com",
-            "https://evil.example.com",
+            "https://127.0.0.1:3081",
         )
-        assertNull(PocketStatus.publicEndpoint(weird, now = 1L))
+        assertNull(PocketStatus.publicEndpoint(loopback, now = 1L))
+        val lan = live.replace(
+            "https://tunnel-a.trycloudflare.com",
+            "https://192.168.50.58:3081",
+        )
+        assertNull(PocketStatus.publicEndpoint(lan, now = 1L))
+        val cgnat = live.replace(
+            "https://tunnel-a.trycloudflare.com",
+            "https://100.64.1.7:3081",
+        )
+        // CGNAT 100.64/10 在 Endpoint 里明确不算私网（手机在 4G 下拿到的就是它），
+        // 但它作为「公网隧道」照样没意义 —— 这一条记录的是当前行为，不是理想状态。
+        assertNull(PocketStatus.publicEndpoint(cgnat, now = 1L))
+    }
+
+    @Test
+    fun publicEndpoint_acceptsNamedTunnelOnOwnDomain() {
+        // 根治方案：dsh-pocket 切 named 隧道，域名是用户自己的固定域名。
+        // 老版本这里写死 `.trycloudflare.com` 结尾，会把固定域名当垃圾丢掉 ——
+        // 于是「换成固定域名」在 App 侧永远收不到结果（2026-11-03 修）。
+        val named = live.replace(
+            "https://tunnel-a.trycloudflare.com",
+            "https://pocket.example.com",
+        )
+        val ep = PocketStatus.publicEndpoint(named, now = 1L)
+        assertNotNull(ep)
+        assertEquals(Endpoint.Kind.PUBLIC, ep!!.kind)
+        assertTrue(ep.url.startsWith("https://pocket.example.com/"))
+        assertTrue(ep.url.contains("token=87654321"))
+    }
+
+    @Test
+    fun publicEndpoint_namedTunnelEntryIsNotVolatile() {
+        // 命名隧道重启地址不变，所以列表里不该对它显示「地址会变，得重新扫码」，
+        // 也不该被 PocketProbe 当易变条目排除（那会让它连候选都进不去）。
+        val named = live.replace(
+            "https://tunnel-a.trycloudflare.com",
+            "https://pocket.example.com",
+        )
+        val ep = PocketStatus.publicEndpoint(named, now = 1L)
+        assertNotNull(ep)
+        assertFalse(ep!!.urlIsVolatile)
     }
 
     @Test

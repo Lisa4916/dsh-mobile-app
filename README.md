@@ -520,7 +520,7 @@ Remove-Item $Tmp -Recurse -Force
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | `tests=259 failures=0 errors=0 skipped=0`（16 个测试类） |
+| 单元测试 | `tests=261 failures=0 errors=0 skipped=0`（16 个测试类） |
 | APK | `app-debug.apk` 7,415,315 B / `app-release.apk` **1,947,334 B**（0.4.0 发版产物 1,930,950 B） |
 | 装完直进 | release 包全新安装清数据后冷启动 `TotalTime: 313`，直接落 DSH 主界面，无 PIN 屏（`build-artifacts/v05-rel-first.png`） |
 | **只走 4G** | **关 Wi-Fi（只剩 `ccmni1 10.66.64.247/8`）冷启动 `TotalTime: 286`，`pocket.status: saved public address …trycloudflare.com` 后直进主界面** |
@@ -535,7 +535,8 @@ Remove-Item $Tmp -Recurse -Force
 | 键盘弹出 | 帧间隔中位数 11ms，全程 177ms，单调无回弹 |
 | 键盘收起 | rootH 574→895，composerTop 324→484，逐帧 |
 | **三重验收** | `node tools\verify-delivery.mjs` → **14/14 通过**：签名备份 clone→解密→三文件 SHA-256 全 MATCH；知识库 DB 26/26/26 全 ready 且与 `kb/` 26 篇一一对应（0 个 DB-only、0 个孤立源）；三份文档口径无矛盾 |
-| **隧道换名自愈** | 真机注入「死域名 `integrated-idaho-feat-sherman.trycloudflare.com` + 本机回环 `127.0.0.1:3081`」冷启动：`seed failed`（死域名）→ `seeded 1 cookie(s) at http://127.0.0.1:3081` → `answered via http://127.0.0.1:3081` → `dropped 1 stale quick tunnel entry(s)` → `saved public address vector-silicon-brisbane-output.trycloudflare.com`；prefs 里死条目已被替换（`8PCE7LJB99VG7TRO`，Android 15） |
+| **隧道换名自愈** | 真机注入「死域名 `integrated-idaho-feat-sherman.trycloudflare.com` + 本机回环 `127.0.0.1:3081`」冷启动：`seed failed`（死域名）→ `seeded 1 cookie(s) at http://127.0.0.1:3081` → `answered via http://127.0.0.1:3081` → `dropped 1 stale quick tunnel entry(s)` → `saved public address …` → `retrying via …`（自动跳到新地址）；prefs 里死条目已被替换（`8PCE7LJB99VG7TRO`，Android 15） |
+| **固定域名隧道** | `node tools\pocket-tunnel.mjs --host <域名> --token <TOKEN>` 把 dsh-pocket 从 quick 切到 named（`tunnelConfig: mode=named tokenSet=true`），地址此后不再变；App 侧 `PocketStatus.publicEndpoint()` 已不再要求 `.trycloudflare.com` 结尾，否则自有域名会被自己的判据丢掉 |
 
 ## 调试工具链（`tools/`）
 
@@ -574,6 +575,7 @@ Remove-Item $Tmp -Recurse -Force
 | `publish-release.cjs` | `node tools/publish-release.cjs --bump patch` 升版本并提示提交；`--no-bump` 打 tag 并推送，触发 `release.yml` 建 GitHub Release |
 | `push-via-api.mjs` | 兜底：`github.com:443` 的 git 传输不通、但 `api.github.com` 正常时，用 Git Data API 把 HEAD 推上去。`--all` 全量重推（会按 git 对象字节与 mode 上传，远端树必须等于本地 `HEAD^{tree}`） |
 | `tag-only.mjs` | 兜底：远端 master 已就位、只缺 tag 时用它。取版本号的正则必须锚行首，否则抓到注释里的旧版本号 |
+| `pocket-tunnel.mjs` | **隧道模式开关**：`--status` 看现状，`--host <域名> --token <TOKEN>` 切到 named 固定域名，`--quick` 切回随机地址（顺带清空残留 hostname）。自己种 `dsh-auth-*` cookie（裸 POST 恒 401）；本地先校验 token 格式（服务端 `setConfig` 三步写不原子，坏 token 会留下半截配置），启动失败自动回滚；`tunnel.start` 给 45 秒超时 |
 | `verify-delivery.mjs` | **只读验收**：`node tools\verify-delivery.mjs`，退出码 0/1。A 组走 clone→解密→SHA 验签名备份可恢复，B 组验 DB 26 篇 ↔ `kb/` 源 md 一一对应，C 组验三份文档口径无矛盾（不再写死踩坑总数、AGENTS 声明了「以小节号为准」、README 含备份仓地址与解密命令） |
 | `ui-dump.cjs` | `node tools/ui-dump.cjs <ui.xml>`，把 `uiautomator dump` 的 XML 打成「文本 / 类 / bounds / 中心点」，找 adb 点击坐标的最快路径 |
 

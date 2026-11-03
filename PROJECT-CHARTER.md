@@ -12,7 +12,7 @@
 | 当前版本 | `0.5.0` / `versionCode=5`（Release `v0.5.0` 已发布） |
 | 仓库 | `D:\dsh-mobile-app`，远端 `https://github.com/Lisa4916/dsh-mobile-app`（public，`master`） |
 | 规模 | 35 个 `.kt`（main 19 / 4125 行 + test 15 / 2240 行，另 androidTest 1 / 181 行）+ 62 个 `tools/` 脚本（提交数见 `git log`，不在此写死） |
-| 单测基线 | **`tests=259 failures=0 errors=0`**（16 个测试类）；lint **0 error / 22 warning** |
+| 单测基线 | **`tests=261 failures=0 errors=0`**（16 个测试类）；lint **0 error / 22 warning** |
 | 上游依赖 | `dsh-pocket` 2.12.0（反代 :3081 + 认证 + 公网隧道），非本仓库 |
 
 ---
@@ -74,7 +74,7 @@
 | M1 骨架 | 连接列表 / 扫码（CameraX+ZXing）/ 手输 / 全屏 WebView | 真机显示电脑上同一段对话 |
 | M2 体验 | 键盘避让改页面 rAF 自驱（帧间隔中位数 11ms） | 真机逐帧测量 |
 | M3 自愈 | 「访问验证」页自愈（清失效 cookie → 带 retry+token 重连） | CDP 抓到决定性跳转 |
-| M4 工程化 | 拆类（8 个纯 JVM 决策类）+ 259 条单测 + CI + lint | `tests=259 failures=0` |
+| M4 工程化 | 拆类（9 个纯 JVM 决策类）+ 261 条单测 + CI + lint | `tests=261 failures=0` |
 | M5 交互 | 启动不闪侧栏、返回键七层严格互逆 | 逐帧采样 + 7 场景脚本 |
 | M6 分发 | 版本号单一来源、局域网分发页、GitHub Release 自动发版 | 4 个 Release 全部实测可下载可覆盖安装 |
 | M7 零配置 | 自动扫局域网 → 免 PIN 识别 → 公网地址自动读回 | 真机只走 4G 冷启动直进主界面 |
@@ -183,7 +183,7 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 立项书：PROJECT-CHARTER.md（定义/里程碑/验收） 入口：AGENTS.md（构建/踩坑）+ PROGRESS.md（证据）
 环境：JAVA_HOME=D:\AndroidDev\jdk17  ANDROID_HOME=D:\AndroidDev\sdk  ANDROID_SDK_ROOT=D:\AndroidDev\sdk
 gradle：C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat
-基线：tests=259 failures=0；lint 0 error / 22 warning；release APK 1,947,334 B
+基线：tests=261 failures=0；lint 0 error / 22 warning；release APK 1,947,334 B
 版本：0.5.0（versionCode=5）；最新 Release v0.5.0
 真机：用 tools/device.cjs 现取序列号，别写死
 ```

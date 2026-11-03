@@ -1147,6 +1147,38 @@ Failure [INSTALL_FAILED_USER_RESTRICTED: Install canceled by user]
 装完**必须**用 `dumpsys package com.dsh.remote | Select-String lastUpdateTime`
 核对时间戳——脚本报 Success 也可能是把旧包又装了一遍。
 
+### 6.36 想让地址不再变，只有 named 隧道；而 `tunnel.setConfig` 不原子
+
+§6.34 修的是「死域名之后能自己爬回来」，前提是**至少有一个可达的 base**。
+在外面只插流量、电脑的局域网地址也不可达时，一个 base 都没有——那时谁也救不了。
+唯一根治是让地址本身不再变：dsh-pocket 支持 `named` 隧道（固定域名 + Cloudflare
+Tunnel Token），但**默认走 quick**（`settings.json` 里没有 `tunnelMode` 键即 quick）。
+
+**三步前置只有人能做**（机器上没有 `cert.pem`、没有 `CF_*` 环境变量、没有 API token，
+这些都不该由 agent 去申请）：域名已在 Cloudflare 托管 → Zero Trust → Networks →
+Tunnels 建命名隧道拿 **Tunnel Token** → Public Hostname 指到 `http://127.0.0.1:3081`。
+
+用 `node tools\pocket-tunnel.mjs --host <域名> --token <TOKEN>` 切（`--quick` 切回，
+`--status` 看现状）。工具里两道保护是被坑出来的：
+
+1. **`tunnel.setConfig` 是三步写，不原子**（`lib/index.js:390-396`：先
+   `setTunnelMode`、再 `setTunnelHostname`、最后 `setTunnelToken`）。拿 `--token abc`
+   去试，前两步落盘、第三步抛「Tunnel Token 格式不对」，结果 `settings.json` 变成
+   `tunnelMode:"named"` **却没有 token** —— 隧道直接起不来，比改之前更坏。
+   所以本地先按 `lib/settings.mjs` 的同一套规则校验（≥20 字符、只含
+   `A-Za-z0-9+/_=-`），不合格就在发请求前 exit 2；任何一步失败都回滚旧配置。
+2. **quick 隧道 provisioning 有配额**（`quick tunnel provisioning failed with status 429`）。
+   短时间内反复 `tunnel.stop`/`tunnel.start` 会打到它，等几分钟自愈，与你账号无关。
+   这也正是别拿 quick 当长期入口的第二个理由。
+3. **`tunnel.start` 耗时 > 8 秒**是常态（cloudflared 要跟边缘握手拿地址）。客户端超时
+   设 8 秒会误报「请求超时」，而服务端其实已经起来了 —— 去 `--status` 看，
+   `tunnelRunning` 是真、`tunnelUrl` 是新地址。工具里给了 45 秒。
+
+**App 侧要同步放宽一条旧硬校验**：`PocketStatus.publicEndpoint()` 原来要求 host 以
+`.trycloudflare.com` 结尾（quick 时代的判据），命名隧道的自有域名会被它当垃圾丢掉，
+于是「换了固定域名却永远收不到」。现在改成排除法：回环、私网、CGNAT（`100.64/10`）
+才拒，其余https 公网域名都收。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）
@@ -1187,6 +1219,7 @@ Failure [INSTALL_FAILED_USER_RESTRICTED: Install canceled by user]
 | `publish-release.cjs` | `node tools/publish-release.cjs --bump patch` 升版本并提示提交；`--no-bump` 打 tag 推 origin，触发 `release.yml` 建 GitHub Release（手机用固定地址收更新，见 §6.30） |
 | `push-via-api.mjs` | **兜底**：`github.com:443` 的 git 传输不通时，用 Git Data API（blobs → trees → commits → refs）把 HEAD 推到远端并打 tag（§6.30）。git 通道正常时用不到。**文档提交记得加 `--no-tag`**——不然它会拿 `version.properties` 里的版本号重打一次 tag，远端已存在就 422，主分支明明推成功了脚本却非零退出 |
 | `tag-only.mjs` | **兜底**：远端 master 已在正确位置、只缺 tag 时用它。取版本号的正则**必须锚行首**，否则会抓到注释里的旧版本号 |
+| `pocket-tunnel.mjs` | **隧道模式开关**（§6.36）：`--status` 看现状；`--host <域名> --token <Tunnel Token>` 切到 named 固定域名；`--quick` 切回随机地址（顺带清空残留 hostname）。自己种 `dsh-auth-*` cookie（裸 POST 恒 401），本地先校验 token 格式（服务端 `setConfig` 不原子，坏 token 会留下半截配置），失败自动回滚，`tunnel.start` 给 45 秒超时 |
 | `ui-dump.cjs` | `node ui-dump.cjs <ui.xml>`，把 `uiautomator dump` 的 XML 打成「文本 / 类 / bounds / 中心点」，给 adb 点控件找坐标的最快路径 |
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。

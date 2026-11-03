@@ -1075,6 +1075,17 @@ class MainActivity : AppCompatActivity() {
                 if (!existed) {
                     android.util.Log.i("DshRemote", "pocket.status: saved public address ${endpoint.host}")
                 }
+                // 关键：如果这次连的本来就是一条失效的公网档案，光把新地址存进列表不够 ——
+                // 用户还停在旧域名的错误页上（Cloudflare 回的是 1033，页面看起来像"电脑没开"），
+                // 他得自己回列表、再点一次新条目才进得去。既然已经知道新地址，就直接换过去。
+                //
+                // 只在 `current` 本身是易变公网档案时才跳：这次若是靠局域网/回环问出来的，
+                // 说明用户要的是局域网（更快），不该把他踢到公网多绕一跳。
+                val stalePublic = current ?: return@runOnUiThread
+                if (stalePublic.urlIsVolatile && stalePublic.id != endpoint.id) {
+                    android.util.Log.i("DshRemote", "pocket.status: retrying via ${endpoint.host}")
+                    connect(endpoint, persist = true)
+                }
             }
         }, "dsh-pocket-status").start()
     }

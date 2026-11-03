@@ -91,9 +91,21 @@ internal object PocketStatus {
      * 三条硬约束：
      * 1. **`tunnelRunning` 必须为真** —— 关掉隧道后 `tunnelUrl` 仍留在 JSON 里，
      *    照抄会得到一个 530 的死地址（实测旧 quick tunnel 就是这样变成 530 的）；
-     * 2. url 必须是 `https://`，且主机以 `.trycloudflare.com` 结尾 —— 防止把
-     *    设置里填的乱七八糟的东西当地址（服务端只做透传，不做校验）；
+     * 2. url 必须是 `https://`，且主机是**能上网解析的公网名** —— 防止把设置里
+     *    填的乱七八糟的东西当地址（服务端只做透传，不做校验）；
      * 3. **带上 `accessToken`** —— 公网入口永远要 PIN，不带就是验证页，白连一次。
+     *
+     * ## 为什么第 2 条不再要求 `.trycloudflare.com` 结尾（2026-11-03 改）
+     *
+     * 原来写死 `.trycloudflare.com`，是因为 quick 隧道只会给这个后缀。但那等于
+     * **把根治方案挡在门外**：dsh-pocket 支持 `named` 隧道（固定域名，重启不变），
+     * 域名是用户自己的 `pocket.example.com` —— 老判据会把它当垃圾丢掉，于是
+     * 「换成固定域名」这条路在 App 侧根本收不到结果，用户改了配置也白改。
+     *
+     * 现在改成「排除法」：主机名解析得出来、且**不是回环、不是私网、不是 CGNAT**
+     * 就放行。这样既放了命名隧道，也仍然拒绝 `127.0.0.1` / `192.168.x` / `10.x` /
+     * `100.64/10` 这类只在本机、局域网或运营商内网里有意义的值（把它们存成
+     * 「公网隧道」档案是纯粹的误导）。
      */
     fun publicEndpoint(body: String?, now: Long): Endpoint? {
         val snap = parse(body) ?: return null
@@ -102,7 +114,9 @@ internal object PocketStatus {
         if (!base.startsWith("https://", ignoreCase = true)) return null
         if (Endpoint.parseUri(base) == null) return null
         val host = Endpoint.hostOf(base) ?: return null
-        if (!host.endsWith(".trycloudflare.com", ignoreCase = true)) return null
+        if (Endpoint.isLoopbackHost(host)) return null
+        if (Endpoint.isPrivateHost(host)) return null
+        if (isCgnatHost(host)) return null
         val url = BootstrapUrl.build(base, snap.accessToken) ?: return null
         return Endpoint(
             id = EndpointStore.idFor(LABEL, url),
@@ -114,6 +128,22 @@ internal object PocketStatus {
 
     /** 公网档案在列表里显示的名字。 */
     const val LABEL = "公网隧道"
+
+    /**
+     * CGNAT `100.64.0.0/10` 判定。
+     *
+     * [Endpoint.isPrivateHost] 故意**不**把它算私网（手机在 4G 下拿到的就是 CGNAT
+     * 地址，那时局域网入口连不上家里那台电脑才是重点）。但这里语义不同：这是
+     * 「公网隧道」的地址，落进运营商内网段说明它根本不是公网可达的名字。
+     */
+    private fun isCgnatHost(host: String): Boolean {
+        val v4 = host.split('.')
+        if (v4.size != 4) return false
+        val a = v4[0].toIntOrNull() ?: return false
+        val b = v4[1].toIntOrNull() ?: return false
+        if (v4.any { it.toIntOrNull() == null }) return false
+        return a == 100 && b in 64..127
+    }
 
     // ---- 极简取值：只认**顶层**键，不做转义还原（这些值里不会出现转义字符） ----
     //

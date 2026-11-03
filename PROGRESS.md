@@ -2440,3 +2440,116 @@ prefs 事后核对：死域名条目消失，换成 `https://vector-silicon-bris
 - **`adb shell input tap` 在这台机器上被拒**（`InputManager: Input event injection from pid N failed`），
   `monkey -f` 的 `Tap()` 这次也返回 `// Injection Failed`。所以验证走
   `run-as` 写 prefs + 冷启动看日志，不依赖点击。
+
+---
+
+## 第 27 步：给公网一条不再变的地址（named 隧道 + App 侧放宽判据）✅
+
+第 26 步修的是「死域名之后能自己爬回来」，但它有个前提：**至少有一个可达的 base**。
+真机实测把这个前提打穿了 —— 手机只插流量（`ccmni2 10.65.173.48`，无 `wlan0`），
+电脑的局域网地址 `192.168.50.58:3081` 也不可达（`nc: Timeout`），此时
+`PocketProbe.bases` 算出来的候选里只有一条死域名，日志是
+`pocket.status: no usable public address (tried 1: https://…trycloudflare.com)`。
+死锁没解开，只是从「必然发生」变成「在特定网络下发生」。
+
+### 27.1 为什么 quick 隧道救不了这个场景
+
+quick 隧道每次重开换一个 `https://<随机名>.trycloudflare.com`，**这是设计如此**，
+不是 bug，也没有任何参数能让它固定。所以「手机记不住地址」永远存在，
+只是能不能靠另一个入口补回来而已。唯一的根治是让地址本身不变：dsh-pocket 支持
+`named` 隧道（固定域名 + Cloudflare Tunnel Token，`lib/settings.mjs:143-145`），
+但默认走 quick（`settings.json` 里没有 `tunnelMode` 键即 quick，本机就是这种状态）。
+
+### 27.2 前置只有人能做
+
+机器上能查到的全是没有：`~/.cloudflared/cert.pem` 不存在、`LOCALAPPDATA\cloudflared`
+不存在、环境变量无 `CF_*`／`CLOUDFLARE*`、无 `~/.wrangler`；在三个项目里 grep
+`cloudflare|CF_API|zone_id|api_token` 只命中无关文档。也就是说本机没有任何 Cloudflare
+域名或 API 凭据 —— 申请域名、建隧道这类事不该由 agent 代劳。需要人给的是两样：
+**一个托管在 Cloudflare 的域名** + **该命名隧道的 Tunnel Token**（Zero Trust →
+Networks → Tunnels 创建，Public Hostname 的 Service 指向 `http://127.0.0.1:3081`）。
+
+### 27.3 App 侧原来有一道判据会把根治方案挡在门外
+
+`PocketStatus.publicEndpoint()` 第三条硬约束是
+`if (!host.endsWith(".trycloudflare.com", ignoreCase = true)) return null`。
+这条是 quick 时代写的，含义是「只认 Cloudflare 的临时域名」；换成自有域名后，
+新地址会被自己的判据当垃圾丢掉，症状和「隧道没开」一模一样。改法是把白名单换成
+排除法 —— 回环、私网（`10/8`、`172.16-31`、`192.168`、`169.254`）、CGNAT（`100.64/10`）
+才拒，其余 https 公网域名都收。CGNAT 单列一条是因为 `Endpoint.isPrivateHost` **故意**
+不把它算私网（手机 4G 下拿到的就是 CGNAT，那时「局域网连不上家电脑」才是重点），
+而这里语义不同：作为「公网隧道地址」落进运营商内网段说明它根本不可达。
+
+`PocketStatusTest` 相应调整：删 `publicEndpoint_returnsNullForNonCloudflareHost`，
+加 `publicEndpoint_returnsNullForLoopbackAndPrivateHosts`、
+`publicEndpoint_acceptsNamedTunnelOnOwnDomain`、
+`publicEndpoint_namedTunnelEntryIsNotVolatile`（最后一条顺带锁住「命名隧道档案不会
+被列表标成『地址会变』，也会被 `PocketProbe.bases` 当非易变候选纳入」）。
+
+### 27.4 一键切换工具 `tools/pocket-tunnel.mjs`
+
+```
+node tools\pocket-tunnel.mjs --status
+node tools\pocket-tunnel.mjs --host pocket.example.com --token <TUNNEL_TOKEN>
+node tools\pocket-tunnel.mjs --quick
+```
+
+走 RPC 而不是直接改 `settings.json`：改文件要重启 DSH 才生效，而且 `tunnelToken`
+的写入路径带格式校验；走 `tunnel.setConfig` 让 dsh-pocket 自己校验并持久化，还能顺手
+重启隧道。三道坑都写进工具里了：
+
+| 坑 | 现象 | 处置 |
+|---|---|---|
+| `pocket.status` / `tunnel.setConfig` 必须带 `dsh-auth-*` cookie | 裸 POST 恒 401 | 先 `GET /`（带 `--pin` 时 `GET /?token=<PIN>`）拿票，自己从 `Set-Cookie` 捡进模块变量（Node 的 http 客户端没有 cookie 罐） |
+| `tunnel.setConfig` **三步写、不原子**（`lib/index.js:390-396`） | 拿 `--token abc` 试，`settings.json` 变成 `tunnelMode:"named"` 却**没有 token**，隧道起不来，比改之前更坏 | 本地先按 `lib/settings.mjs` 的规则校验（≥20 字符、只含 `A-Za-z0-9+/_=-`），不合格在发请求前 exit 2；任何一步失败回滚 `snapshotConfig()` 记下的旧配置 |
+| `tunnel.stop`/`tunnel.start` 反复打 | `quick tunnel provisioning failed with status 429`，quick 隧道再也起不来（本轮真的踩了：14:28 之后 `tunnelRunning:false`，`cloudflared` 进程全死） | 启动失败按 `/429|provisioning failed/` 打专门解释（等几分钟自愈，与账号无关）；顺带把「别拿 quick 当长期入口」写进输出 |
+| `tunnel.start` 要等边缘握手 | 8 秒超时会误报失败，而服务端其实已经起来 | 该调用单独给 45 秒 |
+
+### 27.5 端到端：死域名 → 自动换新地址 → 自动跳过去
+
+这轮第一次跑出一个**新的**缺口：第 26 步只把新地址存进列表，WebView 仍停在旧域名上，
+而旧域名现在返回的是 Cloudflare **1033**（隧道已关但 DNS 记录还在），页面长得像
+「电脑没开」。用户得自己回列表再点一次，行为上仍是「连不上」。修法是在
+`maybeCapturePublicAddress()` 成功分支里加一次自动重连 —— 仅当 `current` 本身是
+易变公网档案时跳（靠局域网/回环问出结果说明用户要的是局域网，不该把他踢到公网）。
+
+真机现场（`8PCE7LJB99VG7TRO`，注入「死域名 PUBLIC + 本机回环」，`adb reverse
+tcp:3081 tcp:3081` 让回环可达，冷启动）：
+
+```
+14:35:19.844 I DshRemote: pocket.status seed failed at https://vector-silicon-brisbane-output.trycloudflare.com: FileNotFoundException
+14:35:21.101 I DshRemote: pocket.status http 530
+14:35:21.177 I DshRemote: pocket.status: answered via http://127.0.0.1:3081
+14:35:21.179 I DshRemote: pocket.status: dropped 1 stale quick tunnel entry(s)
+14:35:21.183 I DshRemote: pocket.status: saved public address backup-intl-ids-serve.trycloudflare.com
+14:35:21.183 I DshRemote: pocket.status: retrying via backup-intl-ids-serve.trycloudflare.com
+14:35:29.494 I DshRemote: pocket.status: answered via https://backup-intl-ids-serve.trycloudflare.com
+```
+
+注意第 6 行：自动重连后新地址又自己问了一次状态（这次是直接在新 origin 上，
+带 cookie），说明重连后的页面是健康的，不是「跳过去碰运气」。
+prefs 事后只剩回环 + 新公网两条，死条目已被 `dropped 1 stale` 清掉。
+截图 `build-artifacts/s_retry.png` 显示已进入 DSH 首页（插件须知弹窗）。
+
+### 27.6 回归
+
+| 项 | 结果 |
+|---|---|
+| `:app:testDebugUnitTest --rerun-tasks` | `classes=16 tests=261 failures=0 errors=0 skipped=0`（261 = 259 + 删 1 加 3） |
+| `:app:assembleDebug` | exit 0，`app-debug.apk` 7,329,252 B |
+| 编译告警 | 仍是基线 4 条（`PocketStatus.kt:187` 的 `Condition is always 'true'`、`ScanActivity` 两处 `setTargetResolution`、`WebViewFactory` 的 `databaseEnabled`），无新增 |
+| 真机安装 | `Performing Streamed Install / Success`，`lastUpdateTime=2026-11-03 14:34:37` |
+| 当前隧道 | `mode=quick hostname=(空) tokenSet=false`，地址 `https://backup-intl-ids-serve.trycloudflare.com`，公网 `200` + `CF-Ray` |
+
+### 27.7 下一步（等用户给两样东西）
+
+给一个**托管在 Cloudflare 的域名**，以及 Zero Trust → Networks → Tunnels 里那条
+命名隧道的 **Tunnel Token**（ingress 指 `http://127.0.0.1:3081`），然后：
+
+```
+node tools\pocket-tunnel.mjs --host <你的域名> --token <TUNNEL_TOKEN>
+```
+
+预期回读 `tunnelConfig: mode=named hostname=<域名> tokenSet=true`、
+`tunnelUrl=https://<域名>`；手机侧下一次连上任一条能通的入口就会把「公网隧道」
+档案换成这个固定域名，此后**重开电脑也不用再改地址**。

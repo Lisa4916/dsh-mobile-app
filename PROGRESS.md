@@ -2328,3 +2328,18 @@ e2a638c (远端) = 5f654c1 docs: 三处口径冲突收口 + 三重验收脚本
 **验收终态：** `node tools/verify-delivery.mjs` → **15/15 通过**
 （A4-clone 本轮两次尝试都失败，如实降级为 WARN；A4 改走 GitHub API 取同一份密文，
 三个文件解密后 SHA-256 全部 MATCH）。`git status` 工作树干净。
+
+**代码层回归（本轮改动虽全是文档/工具，仍按 §1 跑一遍）：**
+
+| 命令 | 结果 |
+|---|---|
+| `gradle :app:testDebugUnitTest --rerun-tasks` | **tests=235 failures=0 errors=0 skipped=0**（15 个测试类，强制重跑不吃缓存，27.2s） |
+| `gradle :app:assembleDebug` | BUILD SUCCESSFUL（debug APK 正常产出） |
+| `gradle :app:lintDebug` | 22 issue，**全部 Warning、0 Error**（与基线一致） |
+| `node tools/kb-ingest.mjs --dry` | 26 篇渲染/解析往返一致 |
+| `node tools/kb-update.mjs --dry` | 26 篇全部跳过 = 磁盘与库逐篇一致 |
+| `node tools/kb-verify.mjs` | DB 26/26/26 全 ready，passage 26 条全 `validStructure=valid`，versions 46 条 |
+| `node tools/verify-delivery.mjs` | 14/14 通过 |
+
+`git diff 659a265..HEAD --name-only | grep '\.kt$'` 为空 —— 本轮没动 Kotlin 源码，
+单测基线 `235/0/0` 是原样保住的，不是靠改测试凑出来的。

@@ -58,6 +58,7 @@
 | 30 | `pocket-tunnel.mjs` 不再把 503 误报成 PIN 问题 | ✅ | 手工造 503（连打 4 次得 `200/200/200/503`）后 `--status` 自动 retry 救回；公网固定域名仍待 Cloudflare 账号信息（见 30.5） |
 | 31 | 后台不断流 + 答完提醒 + 隧道参数不再写坏（A/B/C/D 四件一起） | ✅ | 单测 281 → 332；lint 0/22；`gradle-path` 5/5、`tunnel-args` 16/16、`cf-setup` 13/13、`cf-api` 19/19；坏 `--host/--token` 在发 RPC **前** exit 2。named 隧道切换脚本已就绪但缺 API Token 未真机跑通（见 31.4 末）；完成通知的 DOM 时序未真机实测（见 31.6） |
 | 32 | USB 真机装机（release 0.5.0）：全新安装 + 启动链路验收 + 直连主界面 | ✅ 装机 / ✅ 直连主界面 | 全新安装时间戳新鲜、release 证书/版本一致、MainActivity 直起无 ResolverActivity、控件树 0 文本节点 + WebView 1、KeepAliveService 前台；首轮 `dsh-pocket :3081` 未起已按设计回落，随后跳过该中间层用直连桥接到 `127.0.0.1:39947`，WebSocket 101 + 53 个 `/api` 200；残留 `pocket.status` 405 与 LAN/4G 判据未跑到，见第 32 节 |
+| 33 | 发版 0.5.1（versionCode=6）：bump + 重打 release + 推代码 + 打 tag + GitHub Release | ✅ 已发布 | `version.properties` 0.5.1/6；本地闸门 332/332、lint 0/22；`ZY22GHMK5F` 覆盖安装 `lastUpdateTime=2026-11-15 17:56:54`；本地提交 `57a698f` → 远端 master `4ef3496`（API 全量推、tag 不抢跑）；tag `v0.5.1` → Release run `43703294215` success、CI run `43703274096` success；Release 资产 1,966,618 B 与 `SHA256SUMS.txt` 一致，远端 APK badging `0.5.1/6` 且证书 SHA-256 一致，见第 33 节 |
 
 **测试基线：JVM 单测全量 `tests=332 failures=0 errors=0 skipped=0`（21 个类）**
 （`AutoConnectTest` 7 + `AutoFailoverTest` 14 + `BackNavigationDeciderTest` 18 + `BootstrapUrlTest` 10 +
@@ -3331,3 +3332,101 @@ App 的 URL 与 `local.properties` 一个字都不用改。桥做四件事：
 把 dsh-pocket 起到 `:3081`（原 32.4 的两步复验法依然有效）。
 `read_image` 读截图仍报 `model "hy4free" does not declare image input`，未做目视核对，
 以上述 dumpsys / uiautomator / logcat / 桥日志为判据。
+
+---
+
+## 第 33 步：发版 0.5.1（versionCode=6） ✅ 已发布
+
+用户追问「这是修该项目的最新版本吗？」后确认第 32 步「装的是最新代码，不是最新发布版」，
+随即下达「执行」：bump `0.5.1 / versionCode=6` → 重打并验收 release → 推积压代码 →
+打 tag `v0.5.1` → 发 GitHub Release。本步把 `v0.5.0` 之后积压的提交（后台保活、
+答完提醒、named 固定域名、模型菜单修复，单测 261 → 332）正式发成新版本。
+
+### 33.1 版本与文档口径
+
+- `D:\dsh-mobile-app\version.properties`：`versionCode=5` / `versionName=0.5.0`
+  → `versionCode=6` / `versionName=0.5.1`。这是唯一事实来源；`release.yml:82-101`
+  强制 `tag == "v$versionName"`，所以 tag 名必须与这里一致。
+- 同步 4 份文档的**当前口径**（不是历史证据）：`AGENTS.md:138-139`、
+  `PROJECT-CHARTER.md:12/:191-192`、`README.md:527/:530`、`PROGRESS.md:70`
+  → `0.5.1 / versionCode=6`、`release APK 1,966,618 B`、最新 Release `v0.5.1`；
+  顺手把 `AGENTS.md:134` / `PROJECT-CHARTER.md:136` 写死的「31 步证据」改成
+  「施工日志：每步做了什么 + 证据，步数随进度增长，不在此写死」。
+- **历史证据一律不改**：`PROGRESS.md` 第 32 节及各步里的 `0.5.0 / versionCode=5`
+  装机/发版记录、`README.md:620` 的 422 说明、`CONTEXT-ANCHOR.md:53` 的 0.1.0 锚点。
+
+### 33.2 闸门（含环境层 OOM 坑）
+
+- 完整闸门 `-Dorg.gradle.jvmargs=-Xmx1536m --max-workers=1 :app:assembleDebug
+  :app:assembleRelease :app:testDebugUnitTest :app:lintDebug` →
+  `BUILD SUCCESSFUL in 3m 34s`、`107 actionable tasks: 14 executed, 93 up-to-date`、
+  `GRADLE_EXIT=0`；`CLASSES=21 tests=332 failures=0 errors=0 skipped=0`、
+  `lint-results-debug.txt` 末行 `0 errors, 22 warnings`。
+- **两次 OOM 崩溃是机器内存不足，不是代码问题**：`--rerun-tasks` 跑到
+  `:app:minifyReleaseWithR8` 后 daemon 消失，`hs_err_pid9716.log:2-3` =
+  `Native memory allocation (mmap) failed to map 348127232 bytes. Error detail: G1 virtual space`；
+  换 `--no-daemon` 又崩，`hs_err_pid4360.log:2-3` =
+  `Native memory allocation (malloc) failed to allocate 1987408 bytes. Error detail: Chunk::new`。
+  机器 `TOTAL_GB=5.94 FREE_GB=2.33`。修法 = `gradle --stop` 后降堆（`-Xmx1536m`）
+  + 单 worker + 增量重跑，不改任何源码/构建脚本（Change Necessity = no-change，环境层）。
+
+### 33.3 本地 release 产物 + 真机覆盖安装
+
+- `app\build\outputs\apk\release\app-release.apk` **1,966,618 B 2026/11/15 17:55:11**，
+  SHA-256 `90c6cdf5510a23a2b47079b36e227a2c69b6cda2fa784e278927a51ae133a28f`；
+  aapt badging `versionCode='6' versionName='0.5.1' sdkVersion:'24' targetSdkVersion:'35'`；
+  apksigner `CN=DSH Remote`、证书 SHA-256
+  `12912cf905c2691dbf9d97e72a4e7322c61f1c1dad10b5385f2a65e9d08532b0`（与 0.5.0 同证书，
+  可直接覆盖安装，连接档案不丢）。debug APK 7,345,936 B。
+- `ZY22GHMK5F`：`adb install -r` → `Success` / `INSTALL_EXIT=0`；
+  `dumpsys package` → `versionCode=6` / `versionName=0.5.1` / `apkSigningVersion=2`、
+  `firstInstallTime=2026-11-15 15:41:50`（保留）、`lastUpdateTime=2026-11-15 17:56:54`；
+  强停重拉 `topResumedActivity=...com.dsh.remote/.MainActivity t1238`、
+  `TEXT_NODE_COUNT=0 WEBVIEW_COUNT=1`，直连桥仍生效、无 `main frame error -8`。
+
+### 33.4 推代码：为什么只能用 API 全量推
+
+- 远端 master 原是 `a76a844...`，其 tree `518fee91...` 等于本地 `96efd3f^{tree}`；
+  本地 `origin/master=659a265` 的 tree 与远端 head 不一致，且本地**没有**远端 head 的
+  commit 对象（`git cat-file -t a76a844` 报 could not get object info）
+  → 普通 `git push` 必 non-fast-forward。
+- 正确路径：`node tools/push-via-api.mjs --all --no-tag`（Git Data API 以远端 master 为
+  parent、用本地 HEAD 全部 176 个 tracked 文件建树）。`--all` 因为不能用错的 base 算差异；
+  `--no-tag` 因为 tag 必须最后打，否则 workflow 会以旧树发版。
+- 本地提交 `57a698f chore(release): 发版 0.5.1（versionCode=6）`（5 文件 +12/−12）；
+  推送输出 `176 个 blob 已上传`、`新 tree = cbc5f987...（与本地树一致 ✅）`、
+  `更新 master -> 200 4ef3496`。复核远端 `4ef3496` 的 tree 仍 = `cbc5f987...` 后才打 tag。
+
+### 33.5 打 tag 与 GitHub Release
+
+- `node tools/tag-only.mjs` → `创建 tag = 201 refs/tags/v0.5.1`（annotated，
+  指向远端 master `4ef3496`）。此前 API 复核 `refs/tags/v0.5.1` = 404 未存在、
+  `releases/latest` 仍是 `v0.5.0`。
+- Release workflow run **43703294215**（`Release v0.5.1`）`completed / success`，
+  job `release` success；同批 CI run **43703274096** 也 `completed / success`
+  （`build-and-test` + `instrumented` 两个 job 全绿）。四个 secrets
+  `KEYSTORE_BASE64/KEYSTORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD` 已核 `SECRETS_TOTAL=4`。
+- `releases/latest` → `v0.5.1 / DSH 手机遥控 0.5.1 / draft=false / prerelease=false /
+  assets=3`：`dsh-remote-0.5.1-6.apk` 1,966,618 B、`dsh-remote-latest.apk` 1,966,618 B、
+  `SHA256SUMS.txt` 185 B。Release 地址
+  https://github.com/Lisa4916/dsh-mobile-app/releases/tag/v0.5.1 。
+
+### 33.6 远端产物核对（含一处如实记录的字节差异）
+
+- 下载 `dsh-remote-0.5.1-6.apk` 验：badging `0.5.1 / versionCode=6`、
+  `CN=DSH Remote` + 证书 SHA-256 `12912cf9...2b0` 与本地一致；
+  `SHA256SUMS.txt` 里 `3b02d159743d36568594230c049139a502db7e7e7fb3b43c0ae82879c076ea2e`
+  与下载文件实算哈希 `SUMS_MATCH=True`。
+- **红项（不影响发布有效性，但如实留痕）**：CI 在 runner 上用 secrets 里的 keystore
+  独立 `assembleRelease`，远端 APK SHA-256 = `3b02d159...6ea2e`，与本地包
+  `90c6cdf5...a28f` 不同，尺寸同为 1,966,618 B。原因是 R8/签名块在不同构建里字节不完全
+  一致；判据以远端资产自身的 `SHA256SUMS.txt` + badging + 证书为准，三者都对。
+  真机上装的是本地 90c6cdf 那份，功能与版本相同。
+
+### 33.7 本步残留边界
+
+- 第 32 步的 `pocket.status 405`、LAN 免 PIN / 4G 公网判据仍未跑到：直连桥只做
+  透明转发不实现该 RPC，主界面渲染不受影响；要补这些判据仍需把 dsh-pocket 起到 `:3081`。
+- D 档 named 固定域名仍缺 Cloudflare 域名 + API Token（第 31 步遗留），本发版未触碰。
+- 本步只改版本号与文档口径，未改任何 `app/src` / 构建脚本；`version.properties` 的
+  bump 是唯一影响 APK 元数据的改动。

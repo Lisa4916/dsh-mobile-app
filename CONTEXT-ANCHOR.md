@@ -61,7 +61,7 @@ dsh-pocket 反向代理
 | build-tools | 35.0.0 / 36.0.0 / 37.0.0 |
 | platforms | android-35 / android-37.0 |
 | adb | `D:\AndroidDev\sdk\platform-tools\adb.exe` |
-| **Gradle** | **必须 8.9**。短路径副本：`C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat`；工程自带 wrapper 也指向 8.9（走腾讯云镜像） |
+| **Gradle** | **必须 8.9**，固定在 `D:\AndroidDev\gradle-8.9\bin\gradle.bat`（非临时目录）；工程自带 wrapper 也指向 8.9（走腾讯云镜像） |
 | ANDROID_HOME / JAVA_HOME | 均未设，**每次构建需显式导出** |
 | AGP / Kotlin | 8.7.3 / 2.0.21（compileSdk 35、minSdk 24、targetSdk 35） |
 
@@ -74,12 +74,15 @@ dsh-pocket 反向代理
 $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
-& 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
+& 'D:\AndroidDev\gradle-8.9\bin\gradle.bat' `
     -p D:\dsh-mobile-app :app:assembleDebug :app:testDebugUnitTest
 ```
 
 坑（沿用）：
-- Gradle 解压必须在短路径（Windows 260 字符限制会丢 `bin/`）。
+- ~~Gradle 解压必须在短路径（Windows 260 字符限制会丢 `bin/`）。~~
+  **更正（2026-11）**：Gradle 已从 `%TEMP%\gradle-short` 搬到 `D:\AndroidDev\gradle-8.9`，
+  短路径不再是必需项 —— 那个位置会被系统清理，反而制造「Gradle 不见了」的假故障。
+  路径由 `tools/lib/gradle-path.cjs` 的 `resolveGradle()` 统一探测。
 - `~/.gradle/init.d/aliyun-mirrors.gradle` 会与 settings repositories 冲突，需要隔离 `GRADLE_USER_HOME`。
 
 ## 五、真机与通道

@@ -24,13 +24,17 @@ Android 构建失败里**绝大多数不是代码问题，是四个版本号互�
 ### 现象 3：`gradle` 不在 PATH
 
 - **根因**：没装系统级 Gradle，只在临时目录解压过一份。
-- **判据**：`gradle -v` 报 `CommandNotFoundException`；或 `Test-Path "$env:TEMP\gradle-short"` 返回 False。**`%TEMP%` 里的工具链会被系统清理**——实测 `%TEMP%\gradle-short` 已被清空过，此时同一条构建命令报的是「路径不存在」，与「没装 Gradle」是同一副面孔，极易被误判成代码问题或版本冲突。
-- **恢复做法**：目录消失时从 Gradle 发行镜像重新下载 8.9 解压回**同一短路径**，再重跑 `assembleDebug` + `testDebugUnitTest` 确认测试基线，不要临时改用缓存里另一份 Gradle 顶替。
+- **判据**：`gradle -v` 报 `CommandNotFoundException`；或 `Test-Path 'D:\AndroidDev\gradle-8.9\bin\gradle.bat'` 返回 False。**`%TEMP%` 里的工具链会被系统清理**——实测 `%TEMP%\gradle-short` 已被清空过，此时同一条构建命令报的是「路径不存在」，与「没装 Gradle」是同一副面孔，极易被误判成代码问题或版本冲突。
+- **恢复做法**：目录消失时从 Gradle 发行镜像重新下载 8.9 解压，并落到**非临时目录**（本项目用 `D:\AndroidDev\gradle-8.9`），再重跑 `assembleDebug` + `testDebugUnitTest` 确认测试基线，不要临时改用缓存里另一份 Gradle 顶替。
 - **正确做法**：用绝对路径调用，不要改 PATH：
 
 ```powershell
-& "C:\Users\<user>\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat" -p <PROJECT_DIR> :app:assembleDebug
+& "D:\AndroidDev\gradle-8.9\bin\gradle.bat" -p <PROJECT_DIR> :app:assembleDebug
 ```
+
+> 脚本里要探测时用 `tools/lib/gradle-path.cjs` 的 `resolveGradle()`（自测 `node --test tools/__tests__/gradle-path.test.cjs`）。
+> 它按 `D:\AndroidDev\gradle-8.9` → `%TEMP%\gradle-short\gradle-8.9` → `C:\Gradle\gradle-8.9` 顺序找，
+> 全都不存在时抛错并列出每一个候选，**绝不退回到 gradle-9.x**（与 AGP 8.7.3 不兼容）。
 
 ### 现象 4：`JAVA_HOME` 未设置导致构建直接失败
 

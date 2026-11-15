@@ -68,6 +68,12 @@ object WebViewFactory {
                 // 兜底复查：页面可能已经把焦点放在输入框上（点侧边栏进会话就是这条路径），
                 // 造成底部那条键盘区凭空让位。轮询几次，因为聚焦时机在半秒到一秒之间浮动。
                 scheduleFocusSweep(view)
+                // 装「是否在生成」的页面内轮询钩子：状态翻转时经 JS 桥报回原生，
+                // 由 `TaskNotifyPolicy` 决定要不要弹「回答完成」。
+                // 为什么不在 document-start：那时 body 还没有任何元素，第一次 tick
+                // 必然采到空；而且这个钩子只在会话页有意义，onPageFinished 已经够早。
+                // 同一页面里 onPageFinished 可能被调多次，钩子自带 __dshRunStateHooked 哨兵。
+                view.evaluateJavascript(RunStateProbe.hookJs(JS_BRIDGE_NAME), null)
                 host.onPageFinished(url)
             }
 
@@ -163,6 +169,32 @@ object WebViewFactory {
      * 用矩形包含判断而不是 `elementFromPoint`：后者受 pointer-events、遮罩层影响，
      * 而且对 adb 合成的触摸不稳；矩形判断只依赖几何，可靠得多。
      *
+     * ## 弹层内的输入框一律放过（2026-11 修正，真机事故）
+     *
+     * 病灶：「模型选择」的一级菜单能弹出，点「模型」后二级菜单**确实被挂载过**
+     * （CDP 抓到 `+DOM role=menu aria-label="模型"`，含 113 个 `[role=menuitemradio]`），
+     * 但只活几十毫秒就消失。`blur()` 的调用栈指着这段脚本：
+     * ```
+     * at HTMLInputElement.blur (<anonymous>:8:19)
+     * at HTMLDocument.<anonymous> (<anonymous>:71:17)
+     * ```
+     * 时序（`ZY22GHMK5F` / WebView 126.0.6478.71）：
+     * ```
+     * focusin  INPUT._input_14sgc_25 [role=searchbox] aria-label="搜索模型…"
+     * focusout INPUT._input_14sgc_25            ← 同一毫秒就失焦
+     * +DOM     role=menu al="模型" radios=113
+     * ```
+     * 二级菜单自带一个「搜索模型…」搜索框，React Aria 打开菜单时把焦点放进去；
+     * 守卫把它当成「页面又自动聚焦输入框」，立刻 blur；React Aria 判定焦点离开菜单，
+     * 把两级菜单一起关掉。CDP 里把 `HTMLInputElement.prototype.blur` 换成 no-op 后，
+     * 同样两次点击立刻得到 `menus:1 radios:113 active=INPUT|搜索模型…`，菜单稳住 —— 反证成立。
+     *
+     * 守卫要防的只有「会话页渲染完把焦点抢到**底部输入框**」这一种。弹层是用户主动打开的，
+     * 里面搜索框拿到焦点正是这次操作的下一步，拦它等于把菜单拆掉。
+     * 所以焦点目标落在 `[role=menu]` / `[role=listbox]` / `[role=dialog]` / `[aria-modal=true]`
+     * 之内时一律放行。兜底轮询那段（`FORCE_BLUR_IF_UNTOUCHED_JS`）必须用同一套判据，
+     * 否则只修一半：onPageFinished 后 200/500/900/1400ms 那四次求值照样会把菜单拆掉。
+     *
      * 必须在 document-start 注册：等到 onPageFinished 时页面已经聚焦过了。
      */
     private const val FOCUS_GUARD_JS = """
@@ -176,6 +208,40 @@ object WebViewFactory {
             if (!el) return false;
             if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return true;
             return el.isContentEditable === true;
+          }
+
+          /**
+           * 焦点目标是否落在弹层里。
+           *
+           * 用祖先遍历而不是 closest()：closest 在部分老 WebView 上对复杂选择器支持不稳，
+           * 手写遍历还能顺便限制层数（菜单搜索框到 [role=menu] 实测隔 3 层）。
+           *
+           * ## 为什么还要认「直挂 body 下的 role=group 门户」（第二次真机事故）
+           *
+           * 只认 `[role=menu]` 依然修不好。实测搜索框的祖先链是：
+           * `INPUT[role=searchbox] < SPAN < DIV < DIV[role=group] < BODY`
+           * —— 链上没有 `[role=menu]`。原因在时序：
+           * ```
+           * t=8237  focusin INPUT[role=searchbox]
+           * t=8340  +DOM  role=menu al="模型" radios=113
+           * ```
+           * React Aria 先把焦点放进搜索框，100ms 后才把 `role=menu` 写到容器上。
+           * 同步判定那一刻菜单「还不存在」，`inOverlay` 必然 false，于是照样 blur，
+           * 菜单又被拆掉。能提前认出来的唯一标记，就是那个已经挂在 body 下的
+           * `role=group` 门户容器 —— 弹层是 portal 出去的，这就是它的落点。
+           */
+          function inOverlay(el){
+            var OVERLAY = '[role=menu],[role=listbox],[role=dialog]';
+            for (var i = 0; i < 12 && el; i++) {
+              if (el.matches && el.matches(OVERLAY)) return true;
+              if (el.getAttribute && el.getAttribute('aria-modal') === 'true') return true;
+              // 弹层门户：role=group 且直接挂在 body 下。页面正文不会这样摆，
+              // 只有 portal 出来的浮层才会（侧栏、菜单、下拉都在 body 直属节点里）。
+              if (el !== document.body && el.getAttribute &&
+                  el.getAttribute('role') === 'group' && el.parentElement === document.body) return true;
+              el = el.parentElement;
+            }
+            return false;
           }
 
           /**
@@ -229,16 +295,28 @@ object WebViewFactory {
           document.addEventListener('focusin', function(e){
             var t = e.target;
             if (!isTextField(t)) return;
+            // 弹层里的输入框是用户主动打开的那一层，拦它等于把菜单拆掉（见函数头注释）
+            if (inOverlay(t)) return;
             if (Date.now() < allowUntil) {
               allowUntil = 0; // 用掉即作废，后面的自动聚焦不再放行
               return;
             }
-            // 非「点输入框」引发的聚焦 → 立刻回退，别让页面为键盘让位
-            try {
-              t.blur();
-              var sel = window.getSelection && window.getSelection();
-              if (sel && sel.removeAllRanges) sel.removeAllRanges();
-            } catch (err) {}
+            // 非「点输入框」引发的聚焦 → 回退，别让页面为键盘让位。
+            //
+            // 但**不能当场 blur**：React Aria 的时序是先 focusin 搜索框、约 100ms 后
+            // 才把 role=menu 写到容器上（实测 t=8237 与 t=8340）。当场判定时弹层还不存在，
+            // 必判 false 并把菜单拆掉。推迟一帧再判一次，那时门户已挂上，inOverlay 能认出来。
+            // 一帧（约 16ms）对「页面自动聚焦抢键盘」这个场景完全够快，用户感知不到差别。
+            var raf = window.requestAnimationFrame || function(fn){ return setTimeout(fn, 16); };
+            raf(function(){
+              try {
+                if (inOverlay(t)) return;              // 延后复查：原来是弹层，放行
+                if (t !== document.activeElement) return; // 期间已经换过焦点，不归我们管
+                t.blur();
+                var sel = window.getSelection && window.getSelection();
+                if (sel && sel.removeAllRanges) sel.removeAllRanges();
+              } catch (err) {}
+            });
           }, true);
         })();
     """
@@ -267,6 +345,10 @@ object WebViewFactory {
             // 那段 280ms 的过渡早就演完了（实测 3139ms 起、3463ms 结束，而页面 load 事件 2245ms
             // 之后还要等 hydration 才动侧栏 —— 晚一步就完全错过）。
             WebViewCompat.addDocumentStartJavaScript(wv, NO_SIDEBAR_FLASH_JS, setOf("*"))
+            // 菜单滚动时不许原地往上跳。菜单是 portal，点击时才插进 body，
+            // 可能出现在任何一次页面加载里，所以同样得走 document-start ——
+            // 等 onPageFinished 再注入，用户早期的第一次点击就已经吃过跳位了。
+            WebViewCompat.addDocumentStartJavaScript(wv, MENU_ANCHOR_FREEZE_JS, setOf("*"))
         }
     }
 
@@ -377,6 +459,11 @@ object WebViewFactory {
      *
      * 判定同样只看「用户最近是否点过输入框」：页面把每次合法点击记录在
      * `__dshFocusGuardLastHit`，这里比对时间戳即可。
+     *
+     * **弹层里的输入框同样放过**，判据与 `FOCUS_GUARD_JS.inOverlay` 完全一致
+     * （同一串选择器文本，改一处必须改两处）。不这么做的话，只修守卫等于没修：
+     * onPageFinished 之后 200/500/900/1400ms 这四次求值会把刚打开的菜单搜索框 blur 掉，
+     * 「模型选择」二级菜单照样消失。详见 `FOCUS_GUARD_JS` 头部的事故记录。
      */
     const val FORCE_BLUR_IF_UNTOUCHED_JS = """
         (function(){
@@ -385,6 +472,20 @@ object WebViewFactory {
             if (!ae) return '0';
             var isField = ae.tagName === 'TEXTAREA' || ae.tagName === 'INPUT' || ae.isContentEditable === true;
             if (!isField) return '0';
+            // 弹层内的聚焦属于打开它的那次操作，不是页面抢焦点
+            var OVERLAY = '[role=menu],[role=listbox],[role=dialog]';
+            function inOverlay(el){
+              for (var i = 0; i < 12 && el; i++) {
+                if (el.matches && el.matches(OVERLAY)) return true;
+                if (el.getAttribute && el.getAttribute('aria-modal') === 'true') return true;
+                // 弹层门户（portal 到 body 下的 role=group），与守卫里的判据同源
+                if (el !== document.body && el.getAttribute &&
+                    el.getAttribute('role') === 'group' && el.parentElement === document.body) return true;
+                el = el.parentElement;
+              }
+              return false;
+            }
+            if (inOverlay(ae)) return '0';
             var hit = window.__dshFocusGuardLastHit;
             // 2 秒内有过「点输入框」的记录 → 这是用户自己要的，不动
             if (hit && Date.now() - hit.at < 2000) return '0';
@@ -694,6 +795,152 @@ object WebViewFactory {
             var timer = setInterval(function(){ if (mark()) clearInterval(timer); }, 4);
             document.addEventListener('DOMContentLoaded', mark, { once: true });
           }
+        })();
+    """
+
+    /**
+     * 让「弹层内部滚动」不再把菜单整块弹走。
+     *
+     * 现象（第三次真机事故：滑动选择，`ZY22GHMK5F` / WebView 126 实测）：
+     * ```
+     * 刚展开   portal style: left:12px; top:150.929px; --dsh-menu-anchor:--dsh-menu-r38
+     *          portal rect:  top=151  bottom=519     ← 挂在触发按钮下方
+     * 滑一下   portal style: left:12px; top:12px;      --dsh-menu-anchor:--dsh-menu-r38
+     *          portal rect:  top=12   bottom=380     ← 跳到屏幕顶端，上移 139px
+     * ```
+     * 隔离实验排除了触摸因素：`menu.scrollTop = 800`（完全不碰屏幕）同样让它跳；
+     * 而且**跳过去不回来** —— 滚回 `scrollTop=0` 后 `top` 仍是 `12px`。
+     * 触发按钮全程没动（`triggerTop=371`），所以不是锚点跟着内容走，
+     * 是页面按「换内容后的可用高度」重算了一次落点，并把它当成了新基准。
+     *
+     * 手感上就是：手指按住往上滑，菜单整块跳到顶上，手底下的行瞬间换了一批，
+     * 接着点下去自然点到别的模型。
+     *
+     * 为什么在外壳这一层修：`--dsh-menu-anchor` 是页面自己的定位机制，改它要动
+     * DSH 桌面版本体、影响所有客户端；外壳只需要在菜单活着的时候拒绝这次重算，
+     * 桌面端行为分毫不变。
+     *
+     * 边界（别改宽）：
+     * - 只拦「门户内部」的滚动。页面正文滚动时菜单跟着内容走是正确的，直接放行。
+     * - 只在一个有限的窗口内拦（`GUARD_MS`）。页面重算 top 是异步的，实测最长约 1s
+     *   才落地，所以窗口要覆盖它；但窗口不能无限，否则用户拖动窗口、键盘弹出时
+     *   菜单会被钉死在旧位置。
+     * - 锚点变量一变（`--dsh-menu-anchor` 换成别的值），说明换了菜单或触发按钮挪了位，
+     *   此时以页面为准重新记基准，绝不拿上一个菜单的 top 去盖新的。
+     */
+    private const val MENU_ANCHOR_FREEZE_JS = """
+        (function(){
+          if (window.__dshMenuFreeze) return;
+          window.__dshMenuFreeze = true;
+
+          var GUARD_MS = 1500;
+          var guardUntil = 0;
+          var guardEl = null;
+
+          function raf(fn){
+            return (window.requestAnimationFrame || function(f){ return setTimeout(f, 16); })(fn);
+          }
+
+          function anchorOf(p){
+            try { return p.style.getPropertyValue('--dsh-menu-anchor') || ''; }
+            catch (e) { return ''; }
+          }
+
+          function portalOf(node){
+            var el = node;
+            for (var i = 0; i < 12 && el && el !== document.body; i++) {
+              if (el.getAttribute && el.getAttribute('role') === 'group' &&
+                  el.parentElement === document.body) return el;
+              el = el.parentElement;
+            }
+            return null;
+          }
+
+          /**
+           * 记下这个门户「还没被重算过」的 top。
+           *
+           * 返回 true 表示刚刚（重新）记了基准，这一帧不要纠正 —— 否则会把
+           * 记基准这个动作本身当成一次漂移，写回一个刚读出来的值，白忙。
+           */
+          function remember(p){
+            var top = '';
+            try { top = p.style.top || ''; } catch (e) { return false; }
+            if (!top) return false;
+            var anchor = anchorOf(p);
+            if (p.__dshFreezeSeen && p.__dshFreezeAnchor === anchor) return false;
+            p.__dshFreezeTop = top;
+            p.__dshFreezeAnchor = anchor;
+            p.__dshFreezeSeen = true;
+            return true;
+          }
+
+          function tick(){
+            var p = guardEl;
+            if (!p) return;
+            if (Date.now() > guardUntil) { guardEl = null; return; }
+            try {
+              if (!p.isConnected) { guardEl = null; return; }
+              if (remember(p)) { raf(tick); return; }
+              if (p.style.top !== p.__dshFreezeTop) {
+                // 冻结前先看会不会撑出屏幕。触发按钮靠近底部、或者键盘弹出把可视区
+                // 压矮时，页面往上翻是对的 —— 钉住会让菜单下半截掉到屏幕外，
+                // 那时「跳一下」反而比「点不到」好。只在这个前提下让页面说了算。
+                var keep = p.__dshFreezeTop;
+                p.style.top = keep;
+                var r = p.getBoundingClientRect();
+                if (r.bottom > window.innerHeight + 1 || r.top < -1) {
+                  p.style.top = '';
+                  p.__dshFreezeTop = p.style.top;
+                  guardEl = null;
+                  return;
+                }
+              }
+            } catch (e) {}
+            raf(tick);
+          }
+
+          /**
+           * 门户一出现就先记基准。
+           *
+           * 只靠第一次 scroll 去记是不够稳的：万一页面在 scroll 事件派发之前
+           * 就已经重算过 top，记下来的就是那个错位置。MutationObserver 让基准
+           * 取自「菜单刚挂上、还没人动过」的那一刻。
+           *
+           * 门户挂在 body 直属层，所以 childList 不需要 subtree；document-start
+           * 时 body 往往还不存在，先等它出现（最多约 1.6 秒，之后放弃）。
+           */
+          function watchBody(tries){
+            if (!document.body) {
+              if (tries < 200) setTimeout(function(){ watchBody(tries + 1); }, 8);
+              return;
+            }
+            try {
+              var mo = new MutationObserver(function(recs){
+                for (var i = 0; i < recs.length; i++) {
+                  var added = recs[i].addedNodes || [];
+                  for (var j = 0; j < added.length; j++) {
+                    var n = added[j];
+                    if (!n || n.nodeType !== 1 || !n.getAttribute) continue;
+                    if (n.getAttribute('role') !== 'group') continue;
+                    if (n.parentElement !== document.body) continue;
+                    raf(function(target){ return function(){ remember(target); }; }(n));
+                  }
+                }
+              });
+              mo.observe(document.body, { childList: true });
+            } catch (e) {}
+          }
+          watchBody(0);
+
+          document.addEventListener('scroll', function(e){
+            var p = portalOf(e.target);
+            // 不在门户里的滚动（正文、侧栏列表）是页面自己的排版，一律不碰。
+            if (!p) return;
+            if (!p.__dshFreezeSeen) remember(p);
+            guardEl = p;
+            guardUntil = Date.now() + GUARD_MS;
+            raf(tick);
+          }, true);
         })();
     """
 

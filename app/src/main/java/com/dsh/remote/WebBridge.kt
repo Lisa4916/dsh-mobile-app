@@ -25,4 +25,17 @@ class WebBridge(private val host: MainActivity) {
     /** 让页面知道自己跑在原生外壳里，可用于隐藏「在浏览器打开」之类提示。 */
     @JavascriptInterface
     fun isNativeShell(): Boolean = true
+
+    /**
+     * 页面内轮询钩子在「生成中 / 空闲」翻转时调这里。
+     *
+     * 这个方法是 `@JavascriptInterface`，跑在 WebView 的 JavaBridge 线程，**不是主线程**。
+     * 所以 `host` 一侧必须自己 post 回主线程，不能在这里碰 View。
+     *
+     * @param raw `RunStateProbe` 里 `JSON.stringify` 出来的串；解析失败就静默丢弃
+     */
+    @JavascriptInterface
+    fun reportRunState(raw: String?) {
+        host.onRunStateReported(raw)
+    }
 }

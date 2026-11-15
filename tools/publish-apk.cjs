@@ -23,7 +23,11 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const DIST = path.join(ROOT, 'dist');
-const GRADLE = 'C:\\Users\\yaoqi\\AppData\\Local\\Temp\\gradle-short\\gradle-8.9\\bin\\gradle.bat';
+
+// gradle.bat 的位置不能写死：`%TEMP%` 会被系统清理，实测 2026-11 那条路径已消失。
+// 探测逻辑在 lib/gradle-path.cjs，由 tools/__tests__/gradle-path.test.cjs 钉住。
+const { resolveGradle } = require('./lib/gradle-path.cjs');
+const GRADLE = resolveGradle();
 const APK_SRC = path.join(ROOT, 'app', 'build', 'outputs', 'apk', 'release', 'app-release.apk');
 
 const argv = process.argv.slice(2);

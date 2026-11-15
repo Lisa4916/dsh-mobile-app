@@ -161,6 +161,36 @@ class MainActivity : AppCompatActivity() {
     /** WebViewClient 用它判断「是不是同一台电脑」，决定 URL 留在 WebView 还是交给外部浏览器。 */
     internal val endpointHost: String? get() = current?.host
 
+    /**
+     * 上一次采样到的「是否在生成」。null = 本次连接还没采到过。
+     *
+     * 只在这里存一帧：决策在 [TaskNotifyPolicy] 里做（纯 JVM、可单测），
+     * 这里只负责把上一帧递进去。
+     */
+    private var lastRunState: RunStateProbe.Snapshot? = null
+
+    /** 上次发「任务完成」通知的时间戳（`elapsedRealtime`）。0 = 还没发过。 */
+    private var lastNotifiedAt: Long = 0L
+
+    /**
+     * Activity 当前是否对用户可见。
+     *
+     * 用来给 [TaskNotifyPolicy] 判断「用户正盯着屏幕就不弹通知」。
+     * 不在 onResume 里直接用 `hasWindowFocus()`：后者在弹系统对话框（权限框、
+     * 文件选择器）时也会变 false，那不算用户离开。
+     */
+    private var isResumedNow: Boolean = false
+
+    /** 页面标题，跟着 onReceivedTitle 更新；只用于通知文案。 */
+    private var pageTitle: String? = null
+
+    /** 只问一次的通知权限。用户拒了就不再烦他。 */
+    private var notifiedPermissionAsked: Boolean = false
+
+    private val notificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* 拒了也不影响会话，只是收不到完成提醒 */ }
+
     private val scanLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
@@ -194,6 +224,31 @@ class MainActivity : AppCompatActivity() {
         // 启动即进主界面：不停留在连接列表，直接在后台把 WebView 连上去。
         // 连不上（电脑没开、不在同一 Wi-Fi）才回落到列表页并说明原因，见 onPageError。
         autoconnect()
+    }
+
+    /**
+     * 通知权限只在第一次真正连上之后问一次。
+     *
+     * 为什么不在 onCreate 里问：刚装完 App 第一屏就是「允许通知吗」，用户根本还不知道
+     * 这东西要通知什么，大概率点拒绝；Android 13+ 拒两次之后系统就永远不再显示弹窗了。
+     * 放到「已经连上、已经用起来」之后再问，理解成本最低。
+     */
+    private fun askNotificationPermissionOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (notifiedPermissionAsked) return
+        if (TaskNotifier.canPost(this)) return
+        notifiedPermissionAsked = true
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isResumedNow = true
+    }
+
+    override fun onPause() {
+        isResumedNow = false
+        super.onPause()
     }
 
     /**
@@ -820,6 +875,11 @@ class MainActivity : AppCompatActivity() {
         healthRecheck = null
         if (persist) applyList(connections.touch(endpoint.id))
 
+        // 换服务器等于换了一条会话：上一台的「在生成」状态不能带过来，
+        // 否则新页面第一帧空闲会被误判成「刚完成」，弹一条假通知。
+        lastRunState = null
+        pageTitle = null
+
         listRoot.visibility = View.GONE
         webView.visibility = View.VISIBLE
         progress.visibility = View.VISIBLE
@@ -827,7 +887,37 @@ class MainActivity : AppCompatActivity() {
         applyBarIconTheme(darkBackground = true)
         startConnectWatchdog()
         webView.loadUrl(endpoint.url)
+
+        // 连接一成、App 一进后台就挂常驻通知，避免系统把 WebView 连同 WebSocket 一起回收。
+        startKeepAlive()
     }
+
+    /**
+     * 挂常驻通知（[KeepAliveService]）。
+     *
+     * 只在「有连接」时起；没有连接（停在列表页）时立刻停掉 ——
+     * 一个什么都不保的常驻通知只是骚扰。
+     */
+    private fun startKeepAlive() {
+        val ep = current ?: return
+        if (!KeepAlivePolicy.shouldKeep(ep)) return
+        runCatching { KeepAliveService.start(this, ep, pageTitle) }
+            .onFailure { android.util.Log.w("DshRemote", "起保活服务失败: ${it.javaClass.simpleName}") }
+    }
+
+    /**
+     * 页面标题变了就顺手刷新通知正文。
+     *
+     * 只在服务已经起着时才有意义（没起就是第一次，startKeepAlive 会带上当前标题）：
+     * 重复 `startService` 是安全的，系统只会再走一次 onStartCommand 更新通知。
+     */
+    private fun refreshKeepAliveNotice() {
+        val ep = current ?: return
+        if (!KeepAlivePolicy.shouldKeep(ep)) return
+        runCatching { KeepAliveService.start(this, ep, pageTitle) }
+            .onFailure { /* 服务没起来过就算了，下次连接会再起 */ }
+    }
+
 
     /**
      * 起一次「这次到底连不连得上」的守望。
@@ -895,6 +985,8 @@ class MainActivity : AppCompatActivity() {
         progress.visibility = View.GONE
         applyBarIconTheme(darkBackground = false)
         refreshSavedList()
+        // 回到列表页 = 没有活动会话了，常驻通知该撤掉。
+        runCatching { KeepAliveService.stop(this) }
     }
 
     /**
@@ -969,6 +1061,8 @@ class MainActivity : AppCompatActivity() {
         progress.visibility = View.GONE
         healHandshakeIfNeeded()
         maybeCapturePublicAddress()
+        askNotificationPermissionOnce()
+        refreshKeepAliveNotice()
         // 复查一次：探测可能被「刚动过手」的静默期挡掉（页面还在过渡稿），
         // 这时代码就再也收不到「已恢复」的信号，闸门会一直以为还在同一轮故障里。
         // 延迟到静默期之后再探一次，保证健康状态一定能被记录。
@@ -1177,6 +1271,48 @@ class MainActivity : AppCompatActivity() {
      */
     internal fun onReceivedTitle(title: String?) {
         if (title != null && title.contains("无法完成登录握手")) healHandshakeIfNeeded()
+        // 标题也是通知正文的来源（「是哪个会话在跑」）。空标题不能覆盖已有值：
+        // 页面路由切换的中间态会短暂给 null，拿它覆盖会让常驻通知闪成占位文案。
+        if (!title.isNullOrBlank()) {
+            pageTitle = title
+            refreshKeepAliveNotice()
+        }
+    }
+
+    /**
+     * 页面内轮询钩子的回调（由 [WebBridge.reportRunState] 转进来）。
+     *
+     * 跑在 WebView 的 JavaBridge 线程，**必须切回主线程**再碰任何 UI / 通知。
+     *
+     * 整条链路只做两件事：把上一帧递进 [TaskNotifyPolicy] 要一个裁决，
+     * 必要时发一条提醒。任何异常都吞掉 —— 通知坏了不能连带把会话搞坏。
+     */
+    internal fun onRunStateReported(raw: String?) {
+        val snap = RunStateProbe.parse(raw) ?: return
+        runOnUiThread {
+            if (isFinishing || isDestroyed) return@runOnUiThread
+            val now = android.os.SystemClock.elapsedRealtime()
+            val action = TaskNotifyPolicy.decide(
+                previous = lastRunState,
+                current = snap,
+                appVisible = isResumedNow,
+                lastNotifiedAt = lastNotifiedAt,
+                now = now,
+            )
+            lastRunState = snap
+            if (action == TaskNotifyPolicy.Action.NOTIFY) {
+                lastNotifiedAt = now
+                postTaskDone(snap.title)
+            }
+        }
+    }
+
+    /** 发「回答完成」。发不出去（权限被关）就是静默失败，绝不打扰会话。 */
+    private fun postTaskDone(answerTitle: String?) {
+        val ep = current ?: return
+        val notice = KeepAlivePolicy.notice(ep, answerTitle ?: pageTitle)
+        TaskNotifier.ensureChannels(this)
+        TaskNotifier.notifyDone(this, notice.title, notice.text)
     }
 
     /**
@@ -1447,6 +1583,13 @@ class MainActivity : AppCompatActivity() {
         // 停掉局域网扫描：一轮是 254 个 TCP 连接，用户已经退出还继续发既是浪费，
         // 也会让下一次进入时的日志里混进上一轮的 onDone。
         lanDiscovery.cancel()
+        // 保活服务不能跟着 Activity 一起活下去：Activity 没了就没有 WebView，
+        // 挂着常驻通知等于骗系统「我还在干活」，用户也会看到一条点不进去的通知。
+        // 注意这里**不是 isFinishing 才停** —— 转屏也会走 onDestroy，
+        // 所以只在真正 finish 时停。
+        if (isFinishing) {
+            runCatching { KeepAliveService.stop(this) }
+        }
         if (this::webView.isInitialized) {
             // 先撤掉还在排队的延迟任务。健康复查那个 Runnable 活 1.4 秒，
             // 不取消就会在已销毁的 WebView 上跑（`isFinishing` 只是兜底，不是取消）。

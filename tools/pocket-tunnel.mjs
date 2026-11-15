@@ -39,6 +39,8 @@
 
 import { request } from 'node:http'
 
+import { validateHost, validateToken, normalizeHost } from './lib/tunnel-args.mjs'
+
 /** 本机代理端口。dsh-pocket 的默认值就是 3081。 */
 const DEFAULT_BASE = 'http://127.0.0.1:3081'
 
@@ -118,17 +120,43 @@ async function rpc(method, payload = null, timeoutMs = 8_000) {
   return result
 }
 
-/** 取票：先 GET 一次首页，让服务端下发 `dsh-auth-*`。 */
+/**
+ * 取票：先 GET 一次首页，让服务端下发 `dsh-auth-*`。
+ *
+ * ## 为什么 503 要带 `dsh-pocket-retry=1` 再来一次
+ *
+ * dsh-pocket `lib/proxy.mjs` 有一道**防暴力握手**闸门：同一来源 IP 在 60 秒内
+ * 累计 `DEFAULT_HANDSHAKE_LIMIT = 3` 次「来了但没带 cookie」的请求，就直接返回
+ * 503 + `x-dsh-pocket-handshake: blocked`，连正文都不给业务层。
+ *
+ * 这台机器上很容易自己撞上去：调试隧道、点开手机、刷新浏览器……几十秒就能攒满三次。
+ * 一旦被闸住，**之后每一次 GET 都是 503**，于是旧版这里报的是
+ * 「没拿到 cookie → 如果设了密码请加 --pin」，把人往 PIN 方向引 —— 假因。
+ *
+ * 服务端留了后门（`HANDSHAKE_RETRY_PARAM`）：URL 上带 `dsh-pocket-retry` 时
+ * `handshake.clear(clientIp)` 清空该 IP 的计数，然后剥掉这个参数照常处理。
+ * 所以 503 时补一次带该参数的请求，就能拿到 cookie。
+ */
 async function seed() {
   const pin = valueOf('--pin')
   const path = pin ? `/?token=${encodeURIComponent(pin)}` : '/'
-  const res = await call('GET', path)
-  if (!cookie) {
+  let res = await call('GET', path)
+  if (cookie) return
+  if (res.status === 503) {
+    const retry = pin
+      ? `/?token=${encodeURIComponent(pin)}&dsh-pocket-retry=1`
+      : '/?dsh-pocket-retry=1'
+    res = await call('GET', retry)
+    if (cookie) return
     throw new Error(
-      `没拿到 dsh-auth-* cookie（GET ${BASE}${path} → ${res.status}）。`
-      + '如果设了公网/局域网密码，请加 --pin <PIN>。',
+      `${BASE} 仍然 503（已带 dsh-pocket-retry=1 重试过一次）。`
+      + '这是 dsh-pocket 的握手闸门，不是 PIN 问题；等一分钟让它自然过期，或重启 DSH。',
     )
   }
+  throw new Error(
+    `没拿到 dsh-auth-* cookie（GET ${BASE}${path} → ${res.status}）。`
+    + '如果设了公网/局域网密码，请加 --pin <PIN>。',
+  )
 }
 
 function printStatus(s) {
@@ -176,13 +204,25 @@ async function main() {
     process.exit(2)
   }
 
-  // **先本地校验 token，再动配置。**
+  // **先本地校验，再动配置。**
   //
   // 踩过的坑（2026-11-03）：服务端的 `tunnel.setConfig` 是三步写——先
   // `setTunnelMode`、再 `setTunnelHostname`、最后 `setTunnelToken`，**不原子**。
   // 拿 `--token abc` 去试，前两步成功落盘、第三步抛「格式不对」，结果 settings.json
   // 变成 `tunnelMode:"named"` 却没有 token —— 隧道直接起不来，比改之前更坏。
   // 所以格式问题必须在发请求之前拦掉；同理，任何一步失败都要回滚旧配置。
+  //
+  // `--host` 和 `--token` 一样要拦（2026-11-06 补）：从浏览器地址栏整条复制
+  // `https://pocket.example.com` 是最常见的输入，旧版本会把它原样发给服务端，
+  // 等最后自证 `cfg.hostname !== host.toLowerCase()` 才发现不一致 —— 那时配置已经写坏了。
+  const hostProblem = validateHost(host)
+  if (hostProblem) {
+    console.error(`--host ${hostProblem}`)
+    console.error('（只填主机名，例如 pocket.example.com，不带协议、路径、端口）')
+    process.exit(2)
+  }
+  const hostName = normalizeHost(host)
+
   const tokenProblem = validateToken(token)
   if (tokenProblem) {
     console.error(`--token ${tokenProblem}`)
@@ -191,18 +231,18 @@ async function main() {
   }
 
   const before = snapshotConfig(await rpc('pocket.status'))
-  const after = await rpc('tunnel.setConfig', { mode: 'named', hostname: host, token })
+  const after = await rpc('tunnel.setConfig', { mode: 'named', hostname: hostName, token })
   console.log('已写入配置：', JSON.stringify(after?.tunnelConfig ?? after))
   await restartTunnel('named', before)
 
   const status = await rpc('pocket.status')
   printStatus(status)
   const cfg = status?.tunnelConfig ?? {}
-  if (cfg.mode !== 'named' || cfg.hostname !== host.toLowerCase() || cfg.tokenSet !== true) {
+  if (cfg.mode !== 'named' || cfg.hostname !== hostName || cfg.tokenSet !== true) {
     console.error('!! 回读的配置与期望不一致，请检查上面几行。')
     process.exit(1)
   }
-  if (status?.tunnelRunning !== true || !String(status?.tunnelUrl ?? '').includes(host.toLowerCase())) {
+  if (status?.tunnelRunning !== true || !String(status?.tunnelUrl ?? '').includes(hostName)) {
     console.error('!! 隧道起来了但地址不是固定域名，看 tunnelState 里的 detail。')
     process.exit(1)
   }
@@ -211,17 +251,9 @@ async function main() {
 }
 
 /**
- * 与 dsh-pocket `lib/settings.mjs` 的 `setTunnelToken` 同一套规则：
- * 非空时至少 20 个 base64url 字符，且只含 `A-Za-z0-9+/_=-`。
- * 返回 null 表示通过，否则返回人话原因。
+ * token/host 的校验规则已经搬到 `tools/lib/tunnel-args.mjs`（可单测），
+ * 这里只保留记录切换前配置与重启隧道的逻辑。
  */
-function validateToken(raw) {
-  const v = String(raw ?? '').trim()
-  if (!v) return '为空'
-  if (v.length < 20) return `太短（${v.length} 字符，至少要 20）`
-  if (!/^[A-Za-z0-9+/_=-]+$/.test(v)) return '含非法字符（只允许 A-Za-z0-9+/_=-）'
-  return null
-}
 
 /** 记下切之前的配置，失败时用来回滚。 */
 function snapshotConfig(status) {

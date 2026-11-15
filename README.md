@@ -112,7 +112,7 @@ dsh-pocket 反向代理（认证 + cookie + 注入 launch token）
 
 ```
 $env:JAVA_HOME='D:\AndroidDev\jdk17'; $env:ANDROID_HOME='D:\AndroidDev\sdk'; $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
-& 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' -p D:\dsh-mobile-app :app:testDebugUnitTest
+& 'D:\AndroidDev\gradle-8.9\bin\gradle.bat' -p D:\dsh-mobile-app :app:testDebugUnitTest
 ```
 
 | 测试类 | 条数 | 覆盖 |
@@ -287,9 +287,12 @@ App 的处理（`RecoveryPlanner` + `HandshakeHealGate`）：
 $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
-& 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
+& 'D:\AndroidDev\gradle-8.9\bin\gradle.bat' `
     -p D:\dsh-mobile-app :app:assembleDebug :app:testDebugUnitTest
 ```
+
+> Gradle 8.9 固定在 `D:\AndroidDev\gradle-8.9\`，**不要用 `%TEMP%` 下那份**（会被系统清理）。
+> 脚本里需要探测时用 `tools/lib/gradle-path.cjs` 的 `resolveGradle()`，全都不存在时会列出所有候选。
 
 装到真机：
 
@@ -520,11 +523,11 @@ Remove-Item $Tmp -Recurse -Force
 
 | 项 | 结果 |
 |---|---|
-| 单元测试 | `tests=261 failures=0 errors=0 skipped=0`（16 个测试类） |
-| APK | `app-debug.apk` 7,415,315 B / `app-release.apk` **1,947,334 B**（0.4.0 发版产物 1,930,950 B） |
+| 单元测试 | `tests=332 failures=0 errors=0 skipped=0`（21 个测试类） |
+| APK | `app-debug.apk` 7,345,936 B / `app-release.apk` **1,966,618 B**（0.5.1 本地重打；0.4.0 发版产物 1,930,950 B） |
 | 装完直进 | release 包全新安装清数据后冷启动 `TotalTime: 313`，直接落 DSH 主界面，无 PIN 屏（`build-artifacts/v05-rel-first.png`） |
 | **只走 4G** | **关 Wi-Fi（只剩 `ccmni1 10.66.64.247/8`）冷启动 `TotalTime: 286`，`pocket.status: saved public address …trycloudflare.com` 后直进主界面** |
-| Release | `v0.4.0` 已发布，固定地址 `200` / 1,930,950 B，SHA-256 `8d791d29…68abd`，与 `SHA256SUMS.txt` 一致 |
+| Release | `v0.5.1` 已发布（`v0.4.0` 旧证据：固定地址 `200` / 1,930,950 B，SHA-256 `8d791d29…68abd`，与 `SHA256SUMS.txt` 一致） |
 | 返回互逆 | `tools/verify-back-layers.cjs` 7 场景全过（面板 / 菜单 / 抽屉 / 会话 / 功能视图 / 首页各按一次只退一层） |
 | 真机 instrumented | `PageProbeJsTest` 7 条 `OK (7 tests)`（`8PCE7LJB99VG7TRO`，Android 15） |
 | lint | 0 error / 22 warning |

@@ -5,11 +5,16 @@
          曾经这里还有：
            ACCESS_NETWORK_STATE —— 计划做「断网时提示」，最终靠 WebView 的
              onReceivedError(ERR_INTERNET_DISCONNECTED) 就够了，代码里从未引用；
-           POST_NOTIFICATIONS   —— 计划做「任务完成通知」，没做。
-         留着它们的代价不是安全，是**误导读代码的人**：看到权限就以为有对应功能。
-         要加回来时请连带功能一起加。 -->
+           POST_NOTIFICATIONS   —— 计划做「任务完成通知」。第 31 步已连同功能一起加回来，
+             见下方三条。<uses-permission> 的顺序按用途分组，不按字母排。 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- 前台服务保活：让 App 进后台后 WebView 里的 WebSocket 不被回收（第 31 步） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 可选：用户不给也能正常用，只是收不到「回答完成」提醒 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
@@ -39,6 +44,20 @@
             android:exported="false"
             android:screenOrientation="portrait"
             android:theme="@style/Theme.DshRemote.Scan" />
+
+        <!-- foregroundServiceType 必须和 startForeground 里传的 type 一致，
+             不一致在 Android 14+ 会抛 SecurityException。
+             用 specialUse 而不是 dataSync：后者在 Android 15 有每天 6 小时额度，
+             超时被系统掐掉；「保持会话不掉线」被限时反而是 bug。
+             exported=false：只由本 App 自己起。 -->
+        <service
+            android:name=".KeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="保持与本地 DSH 网页会话的长连接，避免后台被回收后断流" />
+        </service>
     </application>
 
 </manifest>

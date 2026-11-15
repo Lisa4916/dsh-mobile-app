@@ -39,12 +39,14 @@ $env:JAVA_HOME='D:\AndroidDev\jdk17'
 $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
-# 构建 + 单测（两条一起跑，基线 tests=235 failures=0）
-& 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
+# 构建 + 单测（两条一起跑，基线 tests=332 failures=0）
+& 'D:\AndroidDev\gradle-8.9\bin\gradle.bat' `
     -p 'D:\dsh-mobile-app' :app:assembleDebug :app:testDebugUnitTest --console=plain -q
 
-# 安装到真机
-& 'D:\AndroidDev\sdk\platform-tools\adb.exe' -s ZY22GHMK5F install -r `
+# 安装到真机（序列号现取，别写死 —— 见 §6.25）
+$serial = (& 'C:\Users\yaoqi\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe' `
+    'D:\dsh-mobile-app\tools\device.cjs').Trim()
+& 'D:\AndroidDev\sdk\platform-tools\adb.exe' -s $serial install -r `
     'D:\dsh-mobile-app\app\build\outputs\apk\debug\app-debug.apk'
 ```
 
@@ -62,7 +64,7 @@ dsh.lanPin=<token-lan 的内容>
 |---|---|
 | JDK | `D:\AndroidDev\jdk17`（Temurin 17.0.20.1） |
 | SDK | `D:\AndroidDev\sdk` |
-| Gradle | `C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat` |
+| Gradle | `D:\AndroidDev\gradle-8.9\bin\gradle.bat` |
 | AGP / Kotlin | 8.7.3 / 2.0.21 |
 | compileSdk / minSdk / targetSdk | 35 / 24 / 35 |
 | 真机 | **motorola XT2335-3**（`penang`），Android 14 / SDK 34，adb **`ZY22GHMK5F`**，WebView 117.0.5938.60 |
@@ -70,7 +72,13 @@ dsh.lanPin=<token-lan 的内容>
 | Node（跑 tools/ 脚本） | `C:\Users\yaoqi\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe` |
 
 **Gradle 版本有硬约束**：本机缓存里的 `gradle-9.4.1` 与 AGP 8.7.3 **不兼容**，必须用 8.9。
-`gradle-8.9` 解压在短路径 `%TEMP%\gradle-short\` 下；长路径解压会丢 `bin/`（Windows 260 字符限制）。
+
+**路径别再写死 `%TEMP%`**（2026-11 修正）：原先解压在 `%TEMP%\gradle-short\gradle-8.9\`，
+但 `%TEMP%` 会被系统清理 —— 实测该目录已消失，同一条构建命令报「路径不存在」，
+与「没装 Gradle」是同一副面孔。现在固定在 **`D:\AndroidDev\gradle-8.9\`**（非临时目录）。
+`tools/publish-apk.cjs` 不再硬编码，改为调用 `tools/lib/gradle-path.cjs` 的 `resolveGradle()`
+按候选顺序探测；全都不存在时抛错并列出每一个候选，绝不退回到 9.x。
+探测逻辑有自测：`node --test tools/__tests__/gradle-path.test.cjs`（5 条）。
 
 ---
 
@@ -91,6 +99,8 @@ dsh.lanPin=<token-lan 的内容>
 
 **本文件（AGENTS.md）是施工手册**：构建命令、源码地图、踩坑清单（§6 起，以小节号为准）。
 **`PROGRESS.md` 是施工日志**：每一步做了什么、验证证据是什么。三者分工别混。
+**`DOMAIN-SETUP.md` 是固定域名的操作流程**：DigitalPlat 免费域名 → Cloudflare 加站点 →
+建 API Token → 跑 `tools/cf-named-api.mjs`，含每步实测状态与踩坑表。
 
 ---
 ## 1.5 换个窗口/新会话来接手，怎么让这个项目「认得出来」
@@ -121,12 +131,13 @@ DSH 的指令加载规则（`@deepseek-ai/dsh-agent-instructions`）只有两条
 ```
 项目：D:\dsh-mobile-app（Android WebView 外壳，包名 com.dsh.remote）
 立项书：PROJECT-CHARTER.md（定义/非目标/里程碑/验收口径/风险）
-入口文件：AGENTS.md（构建/源码地图/踩坑清单 §6）、PROGRESS.md（24 步证据）、README.md（对外说明）
+入口文件：AGENTS.md（构建/源码地图/踩坑清单 §6）、PROGRESS.md（施工日志：每步做了什么 + 证据）、README.md（对外说明）
+固定域名流程：DOMAIN-SETUP.md（DigitalPlat 免费域名 → Cloudflare → tools/cf-named-api.mjs）
 构建前必须设：JAVA_HOME=D:\AndroidDev\jdk17  ANDROID_HOME=D:\AndroidDev\sdk  ANDROID_SDK_ROOT=D:\AndroidDev\sdk
-gradle：C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat
-基线：tests=235 failures=0；lint 0 error / 22 warning；release APK 1,947,334 B
-当前版本：0.5.0（versionCode=5）；最新 Release v0.5.0
-真机：ZY22GHMK5F(motorola/Android 14) 或 8PCE7LJB99VG7TRO(Redmi/Android 15)，用 tools/device.cjs 自动识别
+gradle：D:\AndroidDev\gradle-8.9\bin\gradle.bat（不要在 %TEMP% 下找，那里会被系统清理）
+基线：tests=332 failures=0（21 个类）；lint 0 error / 22 warning；release APK 1,966,618 B
+当前版本：0.5.1（versionCode=6）；最新 Release v0.5.1
+真机：ZY22GHMK5F(motorola/Android 14，主用) 或 8PCE7LJB99VG7TRO(Redmi/Android 15)，用 tools/device.cjs 自动识别
 ```
 
 > **不要**把全局路由表（`D:\DeepSeek Harness\AGENTS.md`）当作本项目的事实来源 ——
@@ -159,14 +170,15 @@ gradle：C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.ba
 | 7e | 公网隧道开启 + 真机 4G 验证 + ASK_USER 分支实测 | ✅ |
 | 8 | 手机软件开发知识库：5 篇种子文档入库 + 挂载到本项目与 `D:\DeepSeek Harness`；三次强化后共 **26 篇**（含平台版本节奏、Android 16 迁移、WebView 安全基线、渲染进程兜底、R8/发布、测试分层、架构分层、敏感数据、性能验证、启动阶段 CSS 过渡闪屏） | ✅ 见 §8 |
 | 11 | 体检出的四个问题：同域判定 / 状态栏前景 / 文案 / 渲染进程兜底 | ✅ 见 §6.21–§6.23 |
-| 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ⏳ |
-| 10 | 任务完成通知 / 文件拍照附件 / 多电脑一键切换 | ⏳（局域网自动发现已做，见第 15 行） |
+| 9 | 前台服务保活（测试期靠 `svc power stayon true`，不该长期开） | ✅ 第 31 步：`KeepAliveService`（`specialUse`）+ 常驻通知 |
+| 10 | 任务完成通知 / 文件拍照附件 / 多电脑一键切换 | 完成通知 ✅ 第 31 步（页面 aria-label 判据 + `RunStateProbe` 轮询 + `dshNative` 上报）；拍照附件与一键切换 ⏳（局域网自动发现已做，见第 15 行） |
 | 12 | 体检剩余四项：删无用权限与资源 / release 补齐 / 长按删除加确认 / 收敛 strings 与颜色 | ✅ 第 16 步 |
 | 13 | 返回与进入严格互逆：页面拆七层，一次只退一层 | ✅ 见 §6.28 |
 | 14 | 第二台手机装机与收更新：版本号单一来源 + release 分发页 | ✅ 见 §6.29 |
 | 15 | 装完就能连：自动扫局域网找电脑，扫到只差 PIN | ✅ 见 §6.31 |
 | 16 | 免 PIN 直进主界面：扫描时识别「这台电脑不需要 PIN」 | ✅ 见 §6.32 |
 | 17 | 出门只插流量也能连：抓公网地址 + 连不上立刻回落 + 没 Wi-Fi 不等局域网 | ✅ 见 §6.33 |
+| 18 | 后台不断流 + 答完提醒 + 隧道参数不再写坏（四件一起收口） | ✅ 第 31 步，见 `PROGRESS.md` 第 31 节 |
 
 **第 7 项现状（2026-11-02 重测，旧结论已作废）**：`cloudflared.exe` 在
 `C:\Users\yaoqi\.dsh\dsh-pocket\bin\cloudflared.exe`（55,390,512 B，2026.10.7）。
@@ -214,6 +226,29 @@ app/src/main/java/com/dsh/remote/
 │                        HOME_RESET_JS / KEYBOARD_HOOK_JS / NO_SIDEBAR_FLASH_JS 等常量
 │                        NO_SIDEBAR_FLASH_JS：禁掉侧栏首次就位的 transition（§6.27）
 ├── WebBridge.kt         @JavascriptInterface，注入名 "dshNative"
+│                        keyboardHeight() / isNativeShell() / reportRunState(raw)
+│                        ⚠ 跑在 JavaBridge 线程，回调里要自己 runOnUiThread
+├── RunStateProbe.kt     「页面现在是不是在生成」的判据（纯 JVM，第 31 步）
+│                        Snapshot(running, title) / DETECT_FN / JS / hookJs(bridge) / parse(raw)
+│                        ⚠ 判据是输入框主按钮的 aria-label ∈ {停止生成, Stop generating}
+│                          （DSH `dsh-client-ui-conversation/lib/client.js:16151`/`:16528`）；
+│                          不用「复制」按钮 —— 流式过程中它也在，没有区分力
+│                        ⚠ JS 与 hookJs **共用同一份 DETECT_FN**，两份判据必然漂移（§6.37 教训）
+│                        ⚠ hookJs 只在状态**翻转**时上报：每 1.5s 都发 IPC 会压垮主线程
+├── TaskNotifyPolicy.kt  「这一下该不该弹通知」的决策（纯 JVM，第 31 步）
+│                        decide(previous, current, appVisible, lastNotifiedAt, now) → NONE/NOTIFY
+│                        ⚠ 取向是「宁可漏发，不可错发」：首次快照不发、App 在前台不发、冷却 3s
+├── TaskNotifier.kt      NotificationCompat 的构造与发送（Android）
+│                        ensureChannels / keepAlive(notice) / notifyDone / canPost
+│                        ⚠ 渠道重要性**必须写字面量** `NotificationManager.IMPORTANCE_LOW`，
+│                          包成自己的函数会触发 lint WrongConstant（见 §6.40）
+├── KeepAlivePolicy.kt   前台服务保活的决策（纯 JVM，第 31 步）
+│                        shouldKeep(endpoint) / notice(endpoint, pageTitle) / foregroundType(sdkInt)
+│                        ⚠ notice 里**绝不放 URL** —— 锁屏可见，入口 URL 带 ?token=
+├── KeepAliveService.kt  foregroundServiceType="specialUse" 的常驻服务
+│                        ⚠ Android 14+ 必须显式类型 + PROPERTY_SPECIAL_USE_FGS_SUBTYPE
+│                        ⚠ startForeground 要包 try/catch：Android 13+ 缺通知权限时
+│                          服务仍要能起（只是通知静默），不能崩
 ├── HostMatch.kt         「算不算同一个站」的唯一判据（纯 JVM，只用 java.net.URI）
 │                        isSameHost(target, allowedHost)：完全相等 或 host.endsWith(".allowed")
 │                        shouldOpenExternally(target, allowedHost)：只对 http(s) 生效，
@@ -282,9 +317,28 @@ app/src/main/java/com/dsh/remote/
 │                          路径段 / 相似域名 evilexample.com / 完全不同的 host 都必须判外链）
 ├── RecoveryExecutorTest.kt 12 条单测：FakeEnv 记录副作用，钉住「没有 token 时绝不清 pocket
 │                          cookie」「ASK_USER 不重放 Toast」「退避与单轮额度」
-└── RecoveryPlannerTest.kt 14 条单测：fromProbe 映射、plan 分支穷举、hasPinToken
-                           只认 query 里的 token、withRetry 幂等与 fragment 位置
+├── RecoveryPlannerTest.kt 14 条单测：fromProbe 映射、plan 分支穷举、hasPinToken
+│                           只认 query 里的 token、withRetry 幂等与 fragment 位置
+├── FocusGuardScriptTest.kt 11 条单测：读 `WebViewFactory.kt` 源码断言注入脚本的契约 ——
+│                          `inOverlay` 认菜单/列表框/对话框与 portal 门户、
+│                          两段脚本共用同一份判据、blur 延后一帧复查、仍保留防抢键盘能力
+├── RunStateProbeTest.kt  22 条单测：parse 的形态穷举（带引号包装 / 裸 JSON / 半包 / 缺字段 /
+│                          `"null"` / 异常回空串）、title 转义还原、JS 含中英两种停止文案、
+│                          不含 `document.body.`、钩子有哨兵且只在翻转时上报
+├── TaskNotifyPolicyTest.kt 10 条单测：六道门逐个钉住（首次不发 / 解析不出不发 /
+│                          没翻转不发 / 前台不发 / 冷却内不发 / 其余才发）
+├── KeepAlivePolicyTest.kt 19 条单测：shouldKeep、notice 的标题回落与截断、
+│                          「通知里绝不出现 token」、foregroundType 按 sdk 分档、
+│                          两个渠道 ID 与两个通知 ID 都必须不同
+└── MenuAnchorFreezeTest.kt 9 条单测：钉住弹层 top 冻结的四条边界 ——
+                          只在门户内滚动时动手、时间窗有限、锚点变了重记基准、
+                          撑出视口就撒手（`getBoundingClientRect` + `innerHeight`）
 ```
+
+**注意**：`FocusGuardScriptTest` 与 `MenuAnchorFreezeTest` 都是「读源码文本做断言」的护栏
+（`source()` 三处候选路径 + `code()` 剥注释 + `jsConst()` 取 `const val` 后的 `"""` 块）。
+它们守的是**脚本里必须存在的结构契约**，不是字面值 —— 改脚本时同步改断言是正常的，
+但**不许为了让测试变绿而删断言**（见 §6.38 的三条边界）。
 
 `androidTest/PageProbeJsTest.kt`：7 条**真机**用例，验 `PageProbe.JS_TITLE` / `JS_BODY`
 在真 WebView 里能不能把中文标题与正文原样取回（转义、`display:none` 跳过、`about:blank`）。
@@ -1179,6 +1233,235 @@ Tunnels 建命名隧道拿 **Tunnel Token** → Public Hostname 指到 `http://1
 于是「换了固定域名却永远收不到」。现在改成排除法：回环、私网、CGNAT（`100.64/10`）
 才拒，其余https 公网域名都收。
 
+### 6.37 外壳注入的 blur 守卫会把 React Aria 的弹层菜单一起拆掉
+
+`FOCUS_GUARD_JS` 是防「页面自动聚焦输入框抢键盘」的：`focusin` 到文本框就 `blur()`。
+但模型菜单二级面板自带「搜索模型…」搜索框，React Aria 打开面板时会把焦点放进去 ——
+守卫当成抢键盘，立刻 blur，面板判定焦点离开就**把两级菜单一起关掉**。
+真机表现：点「模型」那一行，菜单闪一下就没了，二级从来出不来。
+
+**坑在于判据不能挑 `role=menu`**：实测搜索框祖先链是
+`INPUT[role=searchbox] < SPAN < DIV < DIV[role=group] < BODY`，**链上根本没有 `role=menu`**；
+而且 `focusin` 发生在 `role=menu` 被写上**之前**（实测 t=8237 vs t=8340），同步判定必然是 false。
+可靠的锚点是 **portal 到 body 下的 `role=group` 门户**（`parentElement === document.body`，整个内联切换期间一直在）。
+
+两条配套：
+1. 判据要**同一份源码**用在 `FOCUS_GUARD_JS` 与 `FORCE_BLUR_IF_UNTOUCHED_JS` 两处 ——
+   后者在 `onPageFinished` 后 200/500/900/1400ms 各跑一次，只改前者会把菜单搜索框照样 blur 掉。
+2. `blur()` **改成延后一帧复查**（`requestAnimationFrame`），延后块里再问一次 `inOverlay`
+   与 `t === document.activeElement`。一帧约 16ms，对「防抢键盘」完全够快，但足以让
+   React Aria 把 `role` 写完。
+
+### 6.38 冻结弹层 `top` 必须留「撑出视口就放手」的出口
+
+§6.37 之后还剩一个：二级菜单里滑动列表，整个菜单往上跳一屏且不回弹
+（`top: 150.929px` → `12px`，锚点变量 `--dsh-menu-anchor` 没变、触发按钮也没动）。
+页面把 top 重算成贴顶，桌面浏览器视口高没问题，手机上菜单比可视区还高就露馅。
+
+在外壳层用 `MENU_ANCHOR_FREEZE_JS` 钉住 `style.top`，但**不能无条件钉**：
+触发按钮贴近底部、或键盘弹出把可视区压矮时，往上翻是页面的正确选择，钉住会让菜单
+下半截掉到屏幕外 —— 那时「跳一下」反而比「点不到」好。所以写回之后立刻量一次：
+
+```js
+p.style.top = keep;
+var r = p.getBoundingClientRect();
+if (r.bottom > window.innerHeight + 1 || r.top < -1) { p.style.top = ''; guardEl = null; return; }
+```
+
+另外三条边界：
+1. **`scroll` 必须捕获阶段**（`addEventListener('scroll', fn, true)`）—— 滚动不冒泡，
+   冒泡阶段挂在 document 上收不到内层 div 的滚动。
+2. **时间窗 `GUARD_MS` 取 1500** 而不是几十毫秒 —— 页面重算 top 是异步的，实测最长约 1s 才落地。
+3. **锚点变量变了就重新记基准**，绝不拿上个菜单的 top 盖新的（否则换菜单会钉在上一处）。
+
+---
+
+### 6.39 `pocket.status` 的 503 是握手闸门，不是 PIN 错
+
+`node tools/pocket-tunnel.mjs --status` 曾报「没拿到 `dsh-auth-*` cookie（→ 503）。
+如果设了公网/局域网密码，请加 `--pin <PIN>`」——把人往 PIN 方向引，**假因**。
+三个 token 全试（无 / 两个已知 PIN）都是 503 时，问题就在闸门本身。
+
+`dsh-pocket/lib/proxy.mjs`：`DEFAULT_HANDSHAKE_LIMIT = 3` + `HANDSHAKE_WINDOW_MS = 60_000`
+——**同一 IP 60 秒内 3 次「来了但没带 cookie」就返回 503 + `x-dsh-pocket-handshake: blocked`**，
+连业务层都不到。调试时刷几次、开一次手机，几十秒就攒满；之后每次 GET 都是 503。
+
+后门是 `HANDSHAKE_RETRY_PARAM = 'dsh-pocket-retry'`：URL 上带它时先
+`handshake.clear(clientIp)` 再剥掉参数照常处理。所以 `seed()` 里拿到 503 就补一次
+带 `dsh-pocket-retry=1` 的请求再取 cookie，仍失败才报错、且文案点明「这是闸门不是 PIN」。
+
+验证手法：连打 4 次不带 cookie 得 `200 / 200 / 200 / 503`，紧接着跑 `--status`
+能自动救回（见第 30 步验收表）。
+
+改的是壳层工具而不是 `dsh-pocket` 本体 —— 后者装在
+`~/.dsh/profiles/desktop/node_modules` 下，升级会被覆盖。
+
+### 6.40 lint 的 `WrongConstant` 认不出「包一层常量」
+
+给通知渠道重要性写了 `KeepAlivePolicy.channelImportance(): Int = IMPORTANCE_LOW`，
+`IMPORTANCE_LOW` 又是自己定义的 `const val IMPORTANCE_LOW = 2`。跑 `:app:lintDebug` 直接
+**FAILED**：
+
+```
+TaskNotifier.kt:40: Error: Must be one of: NotificationManager.IMPORTANCE_UNSPECIFIED, ...
+[WrongConstant]
+Lint found 1 errors, 22 warnings
+```
+
+`WrongConstant` 只做字面量/已知平台常量的匹配，跟不进自定义包装函数，也认不出
+自己包里的 `const val 2`。两种写法：
+
+- ✅ 就地写平台常量：`NotificationChannel(id, name, NotificationManager.IMPORTANCE_LOW)`；
+- ❌ 加 `@SuppressLint("WrongConstant")` —— 压制范围比问题本身大，下次真写错也被吞掉。
+
+顺带删掉了 `IMPORTANCE_LOW` 常量与 `channelImportance()`（既然只有一处用，包一层没有收益），
+并把对应两条单测改成断言「两个渠道 ID 不同」——渠道**必须分开**：常驻那条要静音且滑不掉，
+完成通知那条要能响能滑走，合成一个渠道用户就没法只要一个。
+
+### 6.41 换服务器时必须清「上次是不是在生成」
+
+`MainActivity.connect()` 里原本只重置 `current` / `recovery` / `healthRecheck`。
+加了完成通知之后，`lastRunState` 与 `pageTitle` 也必须一起清：
+
+- 用户在 A 机上正在生成，中途切到 B 机；
+- `lastRunState.running == true` 留在内存里；
+- B 机页面加载完，第一帧探针报「空闲」→ `TaskNotifyPolicy` 看到「true → false」→ **立刻弹一条假通知**。
+
+同理 `pageTitle` 不清，新页面的常驻通知会先显示上一台的会话名。
+
+配套一点：`onReceivedTitle` 里**只有非空才覆盖** `pageTitle`。页面路由切换的中间态会给
+`null`，无条件覆盖会让常驻通知闪成占位文案「会话保持中」。
+
+---
+
+### 6.42 `dash.cloudflare.com` 对未登录请求返 403 骨架屏，换浏览器没用
+
+想把 pocket 的公网入口从 quick 随机地址切到 named 固定域名，最顺的路是
+`cloudflared tunnel login` —— 它打开一个授权页，选 zone 点 Authorize 就完事。
+**这条路在本机走不通**，且失败方式很容易被误判成「浏览器卡了」。
+
+实测症状：`tunnel login` 打出授权 URL 后，Edge 与 Chrome（含全新无痕 profile）
+都停在同一张**加载骨架屏**上——虚线圆圈 + 一个星形路径动画，一个字都不出。
+换浏览器、换 profile、等十分钟，全都一样。job 侧则每 ~53 秒刷一行
+`INF Waiting for login...`，五分钟后变成：
+
+```
+INF Failed to write the certificate.
+Your browser will download the certificate instead. You will have to manually
+copy it to the following path:
+C:\Users\yaoqi\.cloudflared\cert.pem
+ error="Failed to fetch resource"
+```
+
+而 `Downloads` 里根本没有 `cert.pem` 落下。
+
+**根因**：`dash.cloudflare.com` 对未登录请求直接返 **403**，返的是那张骨架屏。
+用 CDP 抓页面状态可以确认这一点（开 `--remote-debugging-port=<PORT>`，
+连 `/json/list` 取 `webSocketDebuggerUrl`，`Runtime.evaluate` 读 `document`）：
+
+| 判据 | 值 |
+|---|---|
+| `document.readyState` | `complete` |
+| `document.body.innerText` | 空 |
+| `document.body.children.length` | 有节点，但全是装饰性 `<div>`（骨架屏） |
+| `Runtime.exceptionThrown` | 无 |
+| `Network.loadingFailed` / `blockedReason` | 无 |
+| `document.cookie` 长度 | `0` |
+
+对比 `api.cloudflare.com`：无 token 请求 `/client/v4/user/tokens/verify` 返
+`HTTP 400 {"success":false,"errors":[{"code":1001,"message":"Missing \"Authorization\" header"}]}`
+—— **API 是通的**，只有 dashboard 挡人。
+
+顺便：本机系统代理设在 `HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings`
+（`ProxyServer=127.0.0.1:7890`）但 `ProxyEnable=0`，而 `127.0.0.1:7890` 当前没有进程在听。
+所以别指望「关掉代理」或「打开代理」能解决，两边都不在链路上。
+
+**做法**：别跟 dashboard 较劲，改成全程走 API —— `tools/cf-named-api.mjs`
+（配 `CF_API_TOKEN` + `CF_ACCOUNT_ID` 两个环境变量，权限给
+`Account → Cloudflare Tunnel → Edit` 与 `Zone → DNS → Edit`）。
+`cloudflared tunnel login` 那条路留在 `tools/cf-named-setup.mjs` 里，
+**只在 `~/.cloudflared/cert.pem` 已经由别处生成时才有用**。
+
+### 6.43 账号里没有 zone，"登录成功"不等于"能建 named 隧道"
+
+上一节说 `dash.cloudflare.com` 未登录返 403 骨架屏。登录之后确实就正常渲染了 ——
+但**登录成功只是必要条件**。本次（2026-11-06）实测到两层更硬的墙：
+
+1. **`argotunnel` 授权页会二次要求登录**。dashboard 明明已登录
+   （Edge 里账号 `1002465178@qq.com`，account id `1dc3143a67f4a5ffd47f953f0b07919d`），
+   但打开
+   `https://dash.cloudflare.com/argotunnel?aud=&callback=https%3A%2F%2Flogin.cloudflareaccess.org%2F...`
+   仍会 302 到 `https://dash.cloudflare.com/login?redirect_uri=%2Fargotunnel%3F...`，
+   骨架屏约 12 秒后渲染出 **Sign in to Cloudflare**
+   （Google / Apple / GitHub / Continue with SSO / Email）。
+   用邮箱注册的新账号走 `cloudflared tunnel login` 这条路基本卡死在这里，
+   反复换 Chrome / Edge / 无痕都没有区别，`~/.cloudflared/cert.pem` 始终不生成。
+2. **账号下 0 个域名**。`https://dash.cloudflare.com/<account_id>/domains/overview`
+   显示「**没有数据**」，连刷两次一致。而 **named 隧道必须有 zone**：
+   要么建隧道 + `PUT /cfd_tunnel/{id}/configurations` 写 ingress，要么加一条
+   `<tunnel-id>.cfargotunnel.com` 的 CNAME —— 两者都要 zone。
+   没有域名时 `tools/cf-named-api.mjs` 会在「查 zone」第一步就死，
+   这不是脚本 bug，是资源前提没满足。
+
+**判据顺序**（下次接手先按这个查，别再从浏览器点起）：
+`cert.pem` 在不在 → 登录后 `domains/overview` 有没有 zone → 有 zone 才谈 token 与 tunnel。
+三者缺一，`cf-named-setup.mjs`（证书路线）与 `cf-named-api.mjs`（token 路线）都跑不完整。
+
+**顺带一条**：`api.cloudflare.com` 一直是通的（无 token 时 `400 / code 1001`），
+所以「dashboard 打不开」永远不能推断成「API 不可用」；反过来也一样。
+
+**完整操作流程见 [`DOMAIN-SETUP.md`](DOMAIN-SETUP.md)** ——
+免费域名（DigitalPlat `.dpdns.org`）→ Cloudflare 加站点 → 建 API Token →
+`node tools/cf-named-api.mjs --host <域名>`，含每一步的实测状态与踩坑表。
+
+### 6.44 手机 Chrome 里操作网页必须走 CDP，`input tap` 点不动
+
+本机手机（`ZY22GHMK5F` / moto g53 5G / Android 14）上实测：
+
+- `adb shell input tap X Y` 点**网页里的 HTML 元素**毫无反应：点 DigitalPlat 注册页的
+  「使用 GitHub 继续」十几次都是白点，但 `input tap` 点输入框却能让键盘弹出 ——
+  说明 adb 注入本身没坏，是页面命中区/合成事件不响应坐标点击。
+- 唯一可靠的通道是 **Chrome DevTools Protocol**：
+
+```powershell
+adb shell cat /proc/net/unix | grep devtools      # 找 @chrome_devtools_remote
+adb forward tcp:9222 localabstract:chrome_devtools_remote
+curl.exe -s http://127.0.0.1:9222/json/version    # Browser/126.0.6478.71
+```
+
+然后连 `/json/list` 里某个 page 的 `webSocketDebuggerUrl` 发
+`Runtime.evaluate { returnByValue: true, awaitPromise: true }`。
+Node 22+ 用**全局 `WebSocket`**，不要 `import { WebSocket } from 'ws'`（会 `ERR_MODULE_NOT_FOUND`）。
+
+三条硬约束：
+
+1. **JS 必须写成文件传**。PowerShell 内联带引号/换行的 JS 会被吃掉，
+   CDP 那头报 `SyntaxError: Invalid or unexpected token`，看起来像页面坏了，其实是命令行坏了。
+2. **同一 URL 会有多个标签页**。`/json/list` 里按 url 子串选页会选到旧的那个
+   （`visibilityState` 是 `hidden`），改完的值落在看不见的页上。必须按**数组下标**选，
+   且先确认目标页 `visibilityState === 'visible'`。
+3. **`form.submit()` 会绕过 React 的 onSubmit**。实测把 DigitalPlat 的注册表单整个
+   拼到 URL 上（`?username=...&cf-turnstile-response=1.NpBb-...`）后 GET 刷新，白填一遍。
+   要么直接 `button.click()`，要么先派发
+   `pointerdown/mousedown/pointerup/mouseup` 再 click，走 React 合成事件。
+
+填 `input` / `select` 的正确写法（直接赋 `.value` 不会触发 React 的状态更新）：
+
+```js
+const proto = el.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, v);
+el.dispatchEvent(new Event('input', { bubbles: true }));
+el.dispatchEvent(new Event('change', { bubbles: true }));
+```
+
+**Cloudflare Turnstile 的另一条坑**：`api.js?render=explicit` 加载完不会自动挂载。
+实测容器 `innerHTML` 是空的、`cf-turnstile-response` 值为空、提交按钮灰着，
+但 `api.js` 与 challenge 请求都是 **200**，没有任何 `loadingFailed`。
+等一下它自己会出绿勾；实在不出就刷新页面重走 OAuth（**刷新会让 OAuth 会话过期**，
+页面提示「注册已过期，请重新使用 Google 或 GitHub 继续」）。
+用 sitekey 手动 `turnstile.render()` 也能拿到 token，但**别这么做**——
+token 是外部校验的，绕过渲染不等于能绕过校验，而且白折腾一遍。
+
 ---
 
 ## 7. 调试工具链（`tools/`，全部零依赖 Node，自带极简 WebSocket 客户端）
@@ -1219,8 +1502,28 @@ Tunnels 建命名隧道拿 **Tunnel Token** → Public Hostname 指到 `http://1
 | `publish-release.cjs` | `node tools/publish-release.cjs --bump patch` 升版本并提示提交；`--no-bump` 打 tag 推 origin，触发 `release.yml` 建 GitHub Release（手机用固定地址收更新，见 §6.30） |
 | `push-via-api.mjs` | **兜底**：`github.com:443` 的 git 传输不通时，用 Git Data API（blobs → trees → commits → refs）把 HEAD 推到远端并打 tag（§6.30）。git 通道正常时用不到。**文档提交记得加 `--no-tag`**——不然它会拿 `version.properties` 里的版本号重打一次 tag，远端已存在就 422，主分支明明推成功了脚本却非零退出 |
 | `tag-only.mjs` | **兜底**：远端 master 已在正确位置、只缺 tag 时用它。取版本号的正则**必须锚行首**，否则会抓到注释里的旧版本号 |
-| `pocket-tunnel.mjs` | **隧道模式开关**（§6.36）：`--status` 看现状；`--host <域名> --token <Tunnel Token>` 切到 named 固定域名；`--quick` 切回随机地址（顺带清空残留 hostname）。自己种 `dsh-auth-*` cookie（裸 POST 恒 401），本地先校验 token 格式（服务端 `setConfig` 不原子，坏 token 会留下半截配置），失败自动回滚，`tunnel.start` 给 45 秒超时 |
+| `pocket-tunnel.mjs` | **隧道模式开关**（§6.36）：`--status` 看现状；`--host <域名> --token <Tunnel Token>` 切到 named 固定域名；`--quick` 切回随机地址（顺带清空残留 hostname）。自己种 `dsh-auth-*` cookie（裸 POST 恒 401），发 RPC 前先过 `tools/lib/tunnel-args.mjs` 校验 host 与 token 格式（服务端 `setConfig` 不原子，坏值会留下半截配置），失败自动回滚，`tunnel.start` 给 45 秒超时。**遇到 503 会自动带 `dsh-pocket-retry=1` 重试一次**（§6.39：那是握手闸门，不是 PIN 错） |
 | `ui-dump.cjs` | `node ui-dump.cjs <ui.xml>`，把 `uiautomator dump` 的 XML 打成「文本 / 类 / bounds / 中心点」，给 adb 点控件找坐标的最快路径 |
+| `cf-named-setup.mjs` | **named 隧道一条命令搞定**（走 `cloudflared tunnel login` 路线）：`--status` 体检（二进制/`~/.cloudflared/cert.pem`/授权 zone/已有隧道/pocket 现状）；`--host <域名>` 四步走完「建或复用隧道 → `tunnel token` → `tunnel route dns` → 调 `pocket-tunnel.mjs` 写进 pocket」；`--tunnel <名字>` 换隧道名（默认 `dsh-pocket`）；`--dry-run` 只打印命令。⚠ 前置是人要在浏览器点一次 Authorize |
+| `cf-named-api.mjs` | **同上，但不需要浏览器**：走 Cloudflare API Token，五步「查 zone → 建/复用隧道 → `PUT .../configurations` 设 ingress → upsert CNAME → 写进 pocket」。读 `CF_API_TOKEN`（权限 `Cloudflare Tunnel:Edit` + `DNS:Edit`）与 `CF_ACCOUNT_ID`，**只从环境变量读，不落盘不进 git**。缺任一个就 `exit 2` 并打出「去哪建 token、要给哪些权限」。DNS 是 upsert（改前先读旧值并打进输出，可从日志改回）。⚠ 这条路线存在的原因：`dash.cloudflare.com` 对未登录请求返 **403 骨架屏**，Edge/Chrome 无痕 profile 都卡在加载动画上，`tunnel login` 那条路走不通 |
+
+`tools/lib/`（被上面脚本 require/import 的共享模块，**零依赖**，各有 `node --test` 自测）：
+
+| 模块 | 用途 |
+|---|---|
+| `gradle-path.cjs` | gradle 路径探测：`gradleCandidates(env)` 给候选顺序 `D:\AndroidDev\gradle-8.9` → `%TEMP%\gradle-short\gradle-8.9` → `C:\Gradle\gradle-8.9`；`resolveGradle(env, exists)` 取第一个存在的，**全都不存在时抛错并列出全部候选**。自测 `tools/__tests__/gradle-path.test.cjs`（5 条）。⚠ 绝不退回 gradle-9.x，它与 AGP 8.7.3 不兼容 |
+| `tunnel-args.mjs` | `pocket-tunnel.mjs` 的参数预校验：`validateToken`（≥20 字符 + 字符集）、`validateHost`（拦带协议/路径/端口/空格/缺后缀，各给专属提示）、`normalizeHost`（trim/小写/去 IPv6 方括号/去末尾点）。自测 `tools/__tests__/tunnel-args.test.mjs`（16 条）。⚠ 必须**在发 RPC 之前**拦掉坏值，服务端 `tunnel.setConfig` 三步写不原子 |
+| `cf-setup.mjs` | `cf-named-setup.mjs` 的纯逻辑：`zoneOf`（取根域名，畸形输入返空串不抛）、`zonesFromPem`（解 `cert.pem` 里那坨 base64 JSON，任何一步失败返 `[]`）、`pickTunnel`（按名找未删隧道）、`endpointHost`（归一 `--host`）。自测 `tools/__tests__/cf-setup.test.mjs`（13 条）。⚠ `zoneOf` 对 `com.cn`/`co.uk` 这类二级后缀会切错，但结果只用于提示文案与软判断，不值得引公共后缀表 |
+| `cf-api.mjs` | `cf-named-api.mjs` 的请求体与取值判据：`tunnelCreateBody`（`config_src:'cloudflare'` 必给，否则 `tunnel run --token` 读不到 ingress → 全 502）、`ingressBody`（service 必须 `http://`，兜底 `http_status:404` 不带 hostname）、`dnsRecordBody`（CNAME 到 `<id>.cfargotunnel.com` + `proxied` + `ttl:1`）、`pickAccount`/`pickZone`（匹配不上返 null 不瞎猜）、`tunnelFromList`（排除 `deleted_at` 非空的，否则 DNS 指向已删隧道 → 访问 1033）、`tokenFromTunnel`（拿不到返空串）。自测 `tools/__tests__/cf-api.test.mjs`（19 条） |
+
+跑法（`node --test <目录>` 会 MODULE_NOT_FOUND，必须给具体文件）：
+
+```
+node --test tools/__tests__/gradle-path.test.cjs
+node --test tools/__tests__/tunnel-args.test.mjs
+node --test tools/__tests__/cf-setup.test.mjs
+node --test tools/__tests__/cf-api.test.mjs
+```
 
 `tools/` 里还有一批 `_` 前缀与 `.py` 的一次性探针，是排查过程的残留，不保证可用，新脚本别依赖它们。
 
@@ -1351,7 +1654,21 @@ group: 外壳
 验证方法：把 `local.properties` 改名后 `--rerun-tasks` 重跑，必须 `BUILD SUCCESSFUL` 且
 `BuildConfig.LAN_HOST=""`。这条不验，第一次 push 就会红。
 
-lint 基线：**0 error / 20 warning**（`SetTextI18n` 10、`GradleDependency` 3、`MonochromeLauncherIcon` 2、
+### 11.5 通知里不放 URL
+
+常驻通知与完成通知的正文**只用 `label` 与页面标题**，绝不塞入口 URL：
+锁屏可见，而入口 URL 里带 `?token=`（公网那条还带 PIN）。判定代码在
+`KeepAlivePolicy.notice()`，`KeepAlivePolicyTest` 里有一条专门断言「通知文本不含 token」。
+
+### 11.6 权限要与功能一起加、一起删
+
+`POST_NOTIFICATIONS` 曾在第 12 步被删掉，`AndroidManifest.xml` 里留了一句注释
+「曾计划做任务完成通知，没做，已删除 —— 要加回来时请连带功能一起加」。
+第 31 步就是把功能（`KeepAliveService` + `TaskNotifier`）和这三个权限
+（`FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_SPECIAL_USE` / `POST_NOTIFICATIONS`）一起加回来的。
+**不要出现「声明了权限但没有任何代码用」的状态**——那会在安装时吓用户一跳。
+
+lint 基线：**0 error / 22 warning**（`SetTextI18n` 10、`GradleDependency` 3、`MonochromeLauncherIcon` 2、
 其余各 1）。AGP 默认 `abortOnError` 只对 error 生效，所以 warnings 不挡合并。
 第 16 步把 9 条 `UnusedResources` 清零（删掉 XML 侧零引用的 7 个颜色与 2 个字符串），
 现在剩下的 10 条 `SetTextI18n` 是「文案写死在 Kotlin 里」——要收敛成资源是一次独立改造，不是补几行 strings。

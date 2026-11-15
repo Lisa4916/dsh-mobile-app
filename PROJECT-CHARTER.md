@@ -9,10 +9,10 @@
 | 项目名 | DSH 手机遥控（`dsh-mobile-app`，包名 `com.dsh.remote`） |
 | 立项日期 | 2026-11-01（首个提交 `1a78b7a`） |
 | 状态 | **A 档已交付**（真机可用、可发版）；B 档待排期 |
-| 当前版本 | `0.5.0` / `versionCode=5`（Release `v0.5.0` 已发布） |
+| 当前版本 | `0.5.1` / `versionCode=6`（Release `v0.5.1`） |
 | 仓库 | `D:\dsh-mobile-app`，远端 `https://github.com/Lisa4916/dsh-mobile-app`（public，`master`） |
-| 规模 | 35 个 `.kt`（main 19 / 4125 行 + test 15 / 2240 行，另 androidTest 1 / 181 行）+ 62 个 `tools/` 脚本（提交数见 `git log`，不在此写死） |
-| 单测基线 | **`tests=261 failures=0 errors=0`**（16 个测试类）；lint **0 error / 22 warning** |
+| 规模 | 46 个 `.kt`（main 25 / 5264 行 + test 21 / 3219 行，另 androidTest 1 / 181 行）+ 65 个 `tools/` 顶层脚本（另有 `lib/` 与 `__tests__/` 各 4；提交数见 `git log`，不在此写死） |
+| 单测基线 | **`tests=332 failures=0 errors=0`**（21 个测试类）；lint **0 error / 22 warning** |
 | 上游依赖 | `dsh-pocket` 2.12.0（反代 :3081 + 认证 + 公网隧道），非本仓库 |
 
 ---
@@ -133,13 +133,13 @@ dsh-pocket 反代 :3081（外部组件，不改它；认证 + cookie + 注入 la
 | 文件 | 职责 |
 |---|---|
 | `AGENTS.md` | 构建环境、源码地图、**踩坑清单**（§6 起，以小节号为准）、交接卡（§1.5） |
-| `PROGRESS.md` | 24 步的「做了什么 + 验证证据」，每步一节 |
+| `PROGRESS.md` | 施工日志：每步「做了什么 + 验证证据」各一节（步数随进度增长，不在此写死） |
 | `INTEGRATION.md` | 与 dsh-pocket 的**耦合面清单** + 升级检查清单 |
 | `CONTEXT-ANCHOR.md` | 立项初期的方案选择记录（历史存档，部分数字已过期并标注更正） |
 | `README.md` | 对外说明：现状、源码表、测试表、构建、发版、待办 |
 | `version.properties` | 版本号**唯一事实来源**（Android 只允许 versionCode 不降的覆盖安装） |
-| `app/src/main/java/com/dsh/remote/` | 19 个源文件；核心决策类见 `AGENTS.md` §4 源码地图 |
-| `tools/` | 62 个零依赖 Node / Python 脚本（CDP 探测、真机点击、发版、知识库、验收、证据采集） |
+| `app/src/main/java/com/dsh/remote/` | 25 个源文件；核心决策类见 `AGENTS.md` §4 源码地图 |
+| `tools/` | 65 个零依赖 Node / Python 脚本（CDP 探测、真机点击、发版、知识库、验收、证据采集、隧道切换）+ `lib/` 共享模块与 `__tests__/` 自测 |
 | `.github/workflows/` | `ci.yml`（推 master 触发）+ `release.yml`（推 `v*` tag 触发，产出 Release 资产） |
 
 ---
@@ -152,13 +152,18 @@ $env:ANDROID_HOME='D:\AndroidDev\sdk'
 $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 
 # 闸门（提交前必过）
-& 'C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat' `
+& 'D:\AndroidDev\gradle-8.9\bin\gradle.bat' `
     -p 'D:\dsh-mobile-app' :app:testDebugUnitTest :app:lintDebug
 
 # 装真机（序列号用 tools/device.cjs 现取，别写死）
-& 'D:\AndroidDev\sdk\platform-tools\adb.exe' -s <SERIAL> install -r `
+$serial = (& '<NODE>' 'D:\dsh-mobile-app\tools\device.cjs').Trim()
+& 'D:\AndroidDev\sdk\platform-tools\adb.exe' -s $serial install -r `
     'D:\dsh-mobile-app\app\build\outputs\apk\release\app-release.apk'
 ```
+
+> **`<NODE>`** = `C:\Users\yaoqi\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe`。
+> `gradle.bat` 在 `D:\AndroidDev\gradle-8.9\`，**不在 `%TEMP%`** —— 那里会被系统清理，
+> 2026-11 实测已消失（`AGENTS.md` §1 有完整说明与探测脚本）。
 
 **闸门三条**：单测 `failures=0`、lint `0 error`、真机上跑一遍改动涉及的那条路径。
 **真机验证优先于「代码看起来对」** —— 这个项目所有结论都是从设备上量出来的。
@@ -182,9 +187,9 @@ $env:ANDROID_SDK_ROOT='D:\AndroidDev\sdk'
 项目：D:\dsh-mobile-app（Android WebView 外壳，包名 com.dsh.remote）
 立项书：PROJECT-CHARTER.md（定义/里程碑/验收） 入口：AGENTS.md（构建/踩坑）+ PROGRESS.md（证据）
 环境：JAVA_HOME=D:\AndroidDev\jdk17  ANDROID_HOME=D:\AndroidDev\sdk  ANDROID_SDK_ROOT=D:\AndroidDev\sdk
-gradle：C:\Users\yaoqi\AppData\Local\Temp\gradle-short\gradle-8.9\bin\gradle.bat
-基线：tests=261 failures=0；lint 0 error / 22 warning；release APK 1,947,334 B
-版本：0.5.0（versionCode=5）；最新 Release v0.5.0
+gradle：D:\AndroidDev\gradle-8.9\bin\gradle.bat（不要在 %TEMP% 下找）
+基线：tests=332 failures=0（21 个类）；lint 0 error / 22 warning；release APK 1,966,618 B
+版本：0.5.1（versionCode=6）；最新 Release v0.5.1
 真机：用 tools/device.cjs 现取序列号，别写死
 ```
 
